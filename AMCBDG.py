@@ -8,8 +8,23 @@ import openpyxl
 
 # VERSION INFO
 VERSION = "v1.8.1"
-VERSION_DATE = "2025-06-02"
+VERSION_DATE = "2025-06-05"
 DEBUG_MODE = False
+DEBUG_COMPONENT_PART = 8029831  # Set to a specific part number (as string) to track, e.g. "8029831"
+DEBUG_SO_NUMBER = None      # Set to a specific SO number (as string) to track, e.g. "9678417"
+
+# Print debug configuration at startup
+if DEBUG_MODE:
+    if DEBUG_COMPONENT_PART is None and DEBUG_SO_NUMBER is None:
+        print("\n=== DEBUG MODE ACTIVE BUT NO FILTERS SET ===")
+        print("Set DEBUG_COMPONENT_PART or DEBUG_SO_NUMBER to see detailed output")
+        print("Example: DEBUG_COMPONENT_PART = '8039831' or DEBUG_SO_NUMBER = '9678487'")
+        print("=" * 50)
+    else:
+        print("\n=== DEBUG MODE CONFIGURATION ===")
+        print(f"Tracking Component: {DEBUG_COMPONENT_PART if DEBUG_COMPONENT_PART else 'Not specified'}")
+        print(f"Tracking SO Number: {DEBUG_SO_NUMBER if DEBUG_SO_NUMBER else 'Not specified'}")
+        print("=" * 50)
 
 def safe_metric(metrics, key, default=0):
     """Safely get a metric value with a default if missing"""
@@ -44,7 +59,7 @@ def get_sorting_strategies():
     ]
 
 def build_stock_dictionary(df_ipis):
-    """Build stock dict using IPIS as primary source (StockTally is just a summary of IPIS)"""
+    """Build stock dict using IPIS as primary source"""
     stock = {}
     
     # Use IPIS as the authoritative source
@@ -55,7 +70,6 @@ def build_stock_dictionary(df_ipis):
     else:
         print("WARNING: IPIS sheet is empty - no stock data available!")
     
-    # Note: StockTally is derived from IPIS, so no fallback needed
     return stock
 
 def process_single_scenario(filepath, scenario_name, status_callback=None, scenario_num=1, total_scenarios=1, sorting_strategy=None):
@@ -105,23 +119,9 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
         committed_parts_count = len(committed_components)
         total_committed_qty = sum(committed_components.values())
 
-    # Adjust stock for existing commitments
-    for component, committed_qty in committed_components.items():
-        if component in stock:
-            stock[component] = max(0, stock[component] - committed_qty)
-        else:
-            stock[component] = 0
+    # Initialize used_components with the committed quantities
+    used_components = committed_components.copy()
 
-    # ADD THIS DEBUG SECTION:
-    if DEBUG_MODE:
-        print(f"\n=== DEBUG: STOCK ANALYSIS ===")
-        print(f"DEBUG: Stock for 585711 = {stock.get('585711', 'NOT FOUND')}")
-        print(f"DEBUG: Committed for 585711 = {committed_components.get('585711', 'NOT FOUND')}")
-        if '585711' in stock and '585711' in committed_components:
-            initial_stock = stock.get('585711', 0) + committed_components.get('585711', 0)
-            print(f"DEBUG: Initial stock before commitments = {initial_stock}")
-            print(f"DEBUG: After subtracting commitments = {stock.get('585711', 0)}")
-        
     # Build labor standards dictionary (unchanged)
     df_hours["PART_NO"] = df_hours["PART_NO"].astype(str)
     labor_standards = df_hours.groupby("PART_NO")["Hours per Unit"].sum().to_dict()
@@ -130,7 +130,7 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
         strategy_name = sorting_strategy["name"] if sorting_strategy else "Default"
         status_callback(f"🔁 [Scenario {scenario_num}/{total_scenarios}] Building planned demand structures ({strategy_name})...")
     
-    # Build planned demand structure - UPDATED FROM BOM LOGIC
+    # Build planned demand structure
     planned_demand = df_struct[df_struct["Component Part Number"].notna()].copy()
     planned_demand["SO Number"] = planned_demand["SO Number"].astype(str)
     planned_demand["Component Part Number"] = planned_demand["Component Part Number"].astype(str)
@@ -251,85 +251,125 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
             all_components_available = True
             component_requirements = []
             
-            if DEBUG_MODE and so == "9678487":
-                print(f"\n=== DEBUG: Processing SO 9678487 ===")
+            debug_so_match = DEBUG_SO_NUMBER is not None and str(so) == str(DEBUG_SO_NUMBER)
+            if DEBUG_MODE and debug_so_match:
+                print(f"\n=== DEBUG: Processing SO {so} ===")
                 print(f"Found {len(bom)} components in planned demand")
             
             for _, comp in bom.iterrows():
                 try:
                     comp_part = str(comp["Component Part Number"])
                     required_qty = int(comp["Component Qty Required"]) if pd.notna(comp["Component Qty Required"]) else 0
-                    available = stock.get(comp_part, 0)
+                    total_used = used_components.get(comp_part, 0)
+                    true_available = stock.get(comp_part, 0) - total_used
+                    available = max(0, true_available)
+
+                    # Always use the 'what if' calculation for both debug and output
+                    available_after_usage = true_available - required_qty
+                    will_be_sufficient = true_available >= required_qty
+
+                    # Debug output for selected component part and/or SO number
+                    debug_part_match = DEBUG_COMPONENT_PART is not None and str(comp_part) == str(DEBUG_COMPONENT_PART)
+                    debug_so_match = DEBUG_SO_NUMBER is not None and str(so) == str(DEBUG_SO_NUMBER)
                     
-                    # DEBUG FOR SPECIFIC PARTS
-                    if DEBUG_MODE and (comp_part == "585711" or so == "9678487"):
-                        print(f"\n=== DEBUG: SO {so} processing {comp_part} ===")
-                        print(f"Required qty: {required_qty}")
-                        print(f"Available in stock: {available}")
-                        print(f"Will be sufficient: {available >= required_qty}")
-                    
+                    # Show debug info if we're tracking this component or this SO
+                    if DEBUG_MODE and (debug_part_match or debug_so_match):
+                        header = ""
+                        if debug_part_match:
+                            header = f"\n=== DEBUG: Component {comp_part} used in SO {so} ==="
+                        elif debug_so_match:
+                            header = f"\n=== DEBUG: SO {so} requires component {comp_part} ==="
+                        print(header)
+                        
+                        # Component stock info
+                        print(f"  Stock Information:")
+                        print(f"    Initial stock:      {stock.get(comp_part, 0)}")
+                        print(f"    Committed qty:      {committed_components.get(comp_part, 0) if 'committed_components' in locals() else 'N/A'}")
+                        print(f"    Already used:       {total_used}")
+                        print(f"    Available before:   {true_available}")
+                        
+                        # Order requirements
+                        print(f"  Order Requirements:")
+                        print(f"    Required qty:       {required_qty}")
+                        print(f"    Available after:    {available_after_usage}")
+                        print(f"    Will be sufficient: {will_be_sufficient}")
+                        
+                        if not will_be_sufficient:
+                            print(f"\n  *** SHORTAGE DETECTED: Need {required_qty}, have {true_available}, short {abs(available_after_usage)} ***")
+                        
+                        # Show all POs for this part
+                        future_pos = df_pos[
+                            (df_pos['Part Number'].astype(str) == str(comp_part)) &
+                            (pd.to_datetime(df_pos['Promised Due Date'], errors='coerce') >= datetime.now())
+                        ]
+                        if not future_pos.empty:
+                            print("\n  Future POs:")
+                            for _, po_row in future_pos.iterrows():
+                                po_id = po_row['PO Number']
+                                po_qty = po_row['Qty Due']
+                                po_date = pd.to_datetime(po_row['Promised Due Date']).strftime('%Y-%m-%d')
+                                print(f"    PO {po_id}: {po_qty} due {po_date}")
+                        else:
+                            print("\n  No future POs found for this part")
+                        
+                        print("-" * 80)
+
                     component_requirements.append({
                         'part': comp_part,
                         'required': required_qty,
                         'available': available
                     })
-                    
                     components_needed[comp_part] = required_qty
-                    
+
                     # Check availability but DON'T allocate yet
-                    if available < required_qty:
+                    if not will_be_sufficient:
                         all_components_available = False
-                        shortage = required_qty - available
-                        
-                        if DEBUG_MODE and comp_part == "585711":
-                            print(f"*** SHORTAGE DETECTED: {comp_part} short {shortage} ***")
-                        
+                        shortage = abs(available_after_usage)  # Changed to use available_after_usage directly
                         # Search POs for potential resolution
                         future_pos = df_pos[
                             (df_pos["Part Number"].astype(str) == comp_part) &
                             (pd.to_datetime(df_pos["Promised Due Date"], errors="coerce") >= datetime.now())
                         ]
-
                         po_match = None
                         for _, po_row in future_pos.iterrows():
                             po_qty = po_row["Qty Due"]
                             if po_qty >= shortage:
                                 po_match = po_row
                                 break
-
                         if po_match is not None:
                             po_id = po_match["PO Number"]
                             po_date = pd.to_datetime(po_match["Promised Due Date"]).strftime('%Y-%m-%d')
                             shortage_details.append(f"{comp_part} short {shortage} – PO {po_id} due {po_date}")
                         else:
-                            shortage_details.append(f"{comp_part} (need {required_qty}, have {available}, short {shortage})")
-                                
+                            shortage_details.append(f"{comp_part} (need {required_qty}, have {true_available}, short {shortage})")
                 except Exception as e:
                     all_components_available = False
                     shortage_details.append(f"Component processing error: {str(e)}")
                     continue
-            
-            # If ALL components available, THEN allocate all of them
+
+            # Only after all checks, allocate components if all are available
             if all_components_available:
                 releasable = True
                 for req in component_requirements:
                     comp_part = req['part']
                     required_qty = req['required']
-                    stock[comp_part] -= required_qty
+                    used_components[comp_part] = used_components.get(comp_part, 0) + required_qty
             else:
                 releasable = False
 
         else:
             # This SO has no planned component demand - treat as raw material/purchased part
             try:
-                available = stock.get(part, 0)
-                if available >= demand_qty:
-                    stock[part] -= demand_qty
+                total_used = used_components.get(part, 0)
+                true_available = stock.get(part, 0) - total_used  # Changed to use true_available
+                available_after_usage = true_available - demand_qty  # Added to match debug logic
+                if true_available >= demand_qty:  # Changed to use true_available
+                    used_components[part] = used_components.get(part, 0) + demand_qty
                     releasable = True
                 else:
                     releasable = False
-                    shortage = demand_qty - available
-                    shortage_details.append(f"{part} (need {demand_qty}, have {available}, short {shortage})")
+                    shortage = abs(available_after_usage)  # Changed to use available_after_usage
+                    shortage_details.append(f"{part} (need {demand_qty}, have {true_available}, short {shortage})")
             except:
                 releasable = False
                 shortage_details.append(f"{part} (stock lookup failed)")
@@ -367,7 +407,7 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
             "Shortages": clean_shortages,
             "Components": components_info
         })
-    
+
     # Calculate summary metrics
     df_results = pd.DataFrame(results)
     total_orders = len(df_results)
@@ -385,7 +425,7 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     releasable_qty = df_results[df_results['Status'] == '✅ Release']['Demand'].sum()
     held_qty = df_results[df_results['Status'] == '❌ Hold']['Demand'].sum()
     
-   # Calculate Kit and Instrument metrics with subcategories
+    # Calculate Kit and Instrument metrics with subcategories
     releasable_results = df_results[df_results['Status'] == '✅ Release']
     
     # BVI Kits (Planner codes 3001, 3801)
@@ -452,7 +492,7 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     releasable_instruments_qty = (releasable_manufacturing_qty + releasable_assembly_qty + 
                                 releasable_packaging_qty + releasable_malosa_instruments_qty + 
                                 releasable_virtuoso_qty)
-
+    
     return {
         'name': scenario_name,
         'filepath': filepath,
@@ -1043,7 +1083,7 @@ def load_and_process_files():
    
 💾 Results saved to: {os.path.basename(output_file) if output_file else 'No export (Quick Analysis Mode)'}"""
         else:
-            # Single scenario summary
+            #  scenario summary
             scenario = scenarios[0]
             metrics = scenario['metrics']
             
