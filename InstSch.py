@@ -352,7 +352,8 @@ class MultiDepartmentScheduler:
         
         print(f"Final results: {len(scheduled)} scheduled, {len(unscheduled)} unscheduled")
         print(f"Total hours scheduled: {total_hours_scheduled:.1f}")
-        print(f"Days needed: {days_needed} days ({total_hours_scheduled/daily_hours_target:.1f} theoretical days)")
+        theoretical_days = total_hours_scheduled / daily_hours_target if daily_hours_target > 0 else 0
+        print(f"Days needed: {days_needed} days ({theoretical_days:.1f} theoretical days)")
         
         return {
             'scheduled': scheduled,
