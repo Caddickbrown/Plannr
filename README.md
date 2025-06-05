@@ -23,7 +23,7 @@ An automated materials checker with min/max optimization capabilities:
 - Stock dictionary building
 
 #### Required Input Files:
-1. **Main Sheet:**
+1. **Demand Sheet:**
    - Part: Part number (string)
    - SO Number: Shop order number
    - Start Date: Order start date
@@ -94,7 +94,7 @@ A flexible constraint-based scheduling engine that optimizes production schedule
    - Order information (Order No, Part No, Quantity, Dates)
    - Production requirements
 
-2. **Main Sheet:**
+2. **Main Sheet** (sheet name "Main"):
    - Additional order details
    - Resource requirements (Picks, Hours, Boxes)
    - Geographic and brand information
@@ -122,7 +122,7 @@ A flexible constraint-based scheduling engine that optimizes production schedule
 
 ### Running AMCBD
 1. Prepare your Excel file with required sheets:
-   - Main: Order details and demands
+   - Demand: Order details and demands
    - Planned Demand: Component requirements
    - Component Demand: Current commitments
    - IPIS: Stock levels
