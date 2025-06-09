@@ -484,14 +484,11 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     
     # Total Instruments (sum of all instrument categories)
     releasable_instruments_count = (releasable_manufacturing_count + releasable_assembly_count + 
-                                  releasable_packaging_count + releasable_malosa_instruments_count + 
-                                  releasable_virtuoso_count)
+                                  releasable_packaging_count + releasable_malosa_instruments_count)
     releasable_instruments_hours = (releasable_manufacturing_hours + releasable_assembly_hours + 
-                                  releasable_packaging_hours + releasable_malosa_instruments_hours + 
-                                  releasable_virtuoso_hours)
+                                  releasable_packaging_hours + releasable_malosa_instruments_hours)
     releasable_instruments_qty = (releasable_manufacturing_qty + releasable_assembly_qty + 
-                                releasable_packaging_qty + releasable_malosa_instruments_qty + 
-                                releasable_virtuoso_qty)
+                                releasable_packaging_qty + releasable_malosa_instruments_qty)
     
     return {
         'name': scenario_name,
@@ -910,40 +907,61 @@ def load_and_process_files():
 
             # Write everything to Excel in a single writer session
             with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
-                # Write each scenario to its own sheet first
-                for scenario in scenarios:
-                    sheet_name = scenario['name'][:31]  # Excel sheet name limit
-                    scenario['results_df'].to_excel(writer, sheet_name=sheet_name, index=False)
-                
-                # Write the summary sheet with formatting
-                summary_data.to_excel(writer, sheet_name='Summary', index=False)
-                
-                # Write comparison sheet if it exists
-                if len(scenarios_for_comparison) > 1:
-                    comparison_df.to_excel(writer, sheet_name='Strategy Comparison', index=False)
-                
-                # Get the workbook
-                workbook = writer.book
-                
-                # Format Summary sheet
-                worksheet = writer.sheets['Summary']
-                
-                # Define styles
+                # Define styles once at the start
                 header_fill = openpyxl.styles.PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
                 separator_fill = openpyxl.styles.PatternFill(start_color='F5F5F5', end_color='F5F5F5', fill_type='solid')
                 bold_font = openpyxl.styles.Font(bold=True)
+
+                # Write each scenario to its own sheet first
+                for scenario in scenarios:
+                    sheet_name = scenario['name'][:31]  # Excel sheet name limit
+                    df = scenario['results_df'].copy()
+                    
+                    # Convert numeric columns to proper number format
+                    numeric_columns = ['Demand', 'Hours']
+                    for col in numeric_columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                    
+                    df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    
+                    # Get the worksheet and apply number formats
+                    worksheet = writer.sheets[sheet_name]
+                    for idx, col in enumerate(df.columns, 1):
+                        col_letter = openpyxl.utils.get_column_letter(idx)
+                        if col == 'Hours':
+                            # Format hours with 1 decimal place
+                            for cell in worksheet[col_letter][1:]:
+                                cell.number_format = '#,##0.0'
+                        elif col == 'Demand':
+                            # Format demand as whole numbers
+                            for cell in worksheet[col_letter][1:]:
+                                cell.number_format = '#,##0'
                 
-                # Apply formatting to Summary sheet
-                for row in range(2, worksheet.max_row + 1):  # Start from row 2 (after header)
-                    cell_value = worksheet.cell(row=row, column=1).value
-                    if cell_value.startswith('---'):
+                # Write the summary sheet with formatting
+                summary_data.to_excel(writer, sheet_name='Summary', index=False)
+                worksheet = writer.sheets['Summary']
+                
+                # Apply number formats to summary sheet
+                for row in range(2, worksheet.max_row + 1):
+                    value_cell = worksheet.cell(row=row, column=2)
+                    metric_cell = worksheet.cell(row=row, column=1)
+                    
+                    if any(term in metric_cell.value for term in ['Hours', 'Time']):
+                        value_cell.number_format = '#,##0.0'
+                    elif any(term in metric_cell.value for term in ['Orders', 'Count', 'Quantity']):
+                        value_cell.number_format = '#,##0'
+                    elif 'Rate' in metric_cell.value or 'Speed' in metric_cell.value:
+                        value_cell.number_format = '#,##0.0'
+                    
+                    # Apply visual formatting to Summary sheet
+                    if metric_cell.value.startswith('---'):
                         # Apply separator formatting
                         for col in range(1, 3):  # Columns A and B
                             cell = worksheet.cell(row=row, column=col)
                             cell.fill = separator_fill
-                    elif any(cell_value.startswith(prefix) for prefix in ['Total', 'Releasable', 'BVI', 'Malosa', 'Manufacturing', 'Assembly', 'Packaging', 'Virtuoso']):
+                    elif any(metric_cell.value.startswith(prefix) for prefix in ['Total', 'Releasable', 'BVI', 'Malosa', 'Manufacturing', 'Assembly', 'Packaging', 'Virtuoso']):
                         # Bold important metrics
-                        worksheet.cell(row=row, column=1).font = bold_font
+                        metric_cell.font = bold_font
                 
                 # Format header row in Summary
                 for col in range(1, 3):  # Columns A and B
@@ -964,20 +982,66 @@ def load_and_process_files():
                         adjusted_width = (max_length + 2)
                         worksheet.column_dimensions[column[0].column_letter].width = adjusted_width
                 
-                # If comparison sheet exists, format it too
+                # Write comparison sheet if it exists
                 if len(scenarios_for_comparison) > 1:
+                    comparison_df_formatted = comparison_df.copy()
+                    
+                    # Convert string numbers back to numeric format
+                    numeric_columns = [
+                        'Total Orders', 'Releasable Orders', 'Held Orders', 'Piggyback Orders',
+                        'Total Hours', 'Releasable Hours', 'BVI Kits', 'BVI Kit Hours', 'BVI Kit Qty',
+                        'Malosa Kits', 'Malosa Kit Hours', 'Malosa Kit Qty', 'Total Kits', 'Total Kit Hours',
+                        'Total Kit Qty', 'Manufacturing (3802)', 'Manufacturing Hours', 'Manufacturing Qty',
+                        'Assembly (3803)', 'Assembly Hours', 'Assembly Qty', 'Packaging (3804)', 'Packaging Hours',
+                        'Packaging Qty', 'Malosa Inst (3805)', 'Malosa Inst Hours', 'Malosa Inst Qty',
+                        'Virtuoso (3806)', 'Virtuoso Hours', 'Virtuoso Qty', 'Total Instruments',
+                        'Total Inst Hours', 'Total Inst Qty', 'Committed Parts', 'Committed Qty'
+                    ]
+                    
+                    for col in numeric_columns:
+                        if col in comparison_df_formatted.columns:
+                            # Remove commas and convert to numeric
+                            comparison_df_formatted[col] = comparison_df_formatted[col].astype(str).str.replace(',', '').str.replace('$', '')
+                            comparison_df_formatted[col] = pd.to_numeric(comparison_df_formatted[col], errors='coerce')
+                    
+                    # Handle percentage columns separately
+                    pct_columns = ['Release Rate (%)', 'Qty Release Rate (%)', 'Labor Release Rate (%)']
+                    for col in pct_columns:
+                        if col in comparison_df_formatted.columns:
+                            # Remove % sign and convert to numeric percentage
+                            comparison_df_formatted[col] = comparison_df_formatted[col].astype(str).str.rstrip('%').astype(float) / 100
+                    
+                    comparison_df_formatted.to_excel(writer, sheet_name='Strategy Comparison', index=False)
+                    
+                    # Format the comparison sheet
                     comp_worksheet = writer.sheets['Strategy Comparison']
                     
-                    # Format header row in Comparison
+                    # Apply number formats to all cells in numeric columns
+                    for col_idx, col_name in enumerate(comparison_df_formatted.columns, 1):
+                        col_letter = openpyxl.utils.get_column_letter(col_idx)
+                        
+                        if col_name in pct_columns:
+                            # Format as percentage
+                            for cell in comp_worksheet[col_letter][1:]:
+                                cell.number_format = '0.0%'
+                        elif 'Hours' in col_name:
+                            # Format with 1 decimal place
+                            for cell in comp_worksheet[col_letter][1:]:
+                                cell.number_format = '#,##0.0'
+                        elif any(term in col_name for term in ['Orders', 'Qty', 'Count', 'Parts']):
+                            # Format as whole number with thousands separator
+                            for cell in comp_worksheet[col_letter][1:]:
+                                cell.number_format = '#,##0'
+                    
+                    # Format headers and apply column widths
                     for col in range(1, comp_worksheet.max_column + 1):
                         cell = comp_worksheet.cell(row=1, column=col)
                         cell.font = bold_font
                         cell.fill = header_fill
-                    
-                    # Auto-adjust column widths in Comparison
-                    for column in comp_worksheet.columns:
+                        
+                        # Auto-adjust column width
                         max_length = 0
-                        column = [cell for cell in column]
+                        column = [cell for cell in comp_worksheet[openpyxl.utils.get_column_letter(col)]]
                         for cell in column:
                             try:
                                 if len(str(cell.value)) > max_length:
@@ -985,7 +1049,7 @@ def load_and_process_files():
                             except:
                                 pass
                             adjusted_width = min((max_length + 2), 50)  # Cap width at 50
-                            comp_worksheet.column_dimensions[column[0].column_letter].width = adjusted_width
+                            comp_worksheet.column_dimensions[openpyxl.utils.get_column_letter(col)].width = adjusted_width
         else:
             output_file = None  # No file created
 
@@ -1016,14 +1080,27 @@ def load_and_process_files():
                 
                 summary_text += f"""📁 FILE: {os.path.basename(filepath)}
    🏆 BEST STRATEGY (Orders): {best_orders['sorting_strategy']}
-      → {best_orders['metrics']['releasable_count']:,}/{best_orders['metrics']['total_orders']:,} orders releasable ({best_orders['metrics']['releasable_count']/best_orders['metrics']['total_orders']*100:.1f}%)
-        🔧 BVI Kits: {best_orders['metrics']['releasable_bvi_kits_count']:,} orders, {best_orders['metrics']['releasable_bvi_kits_hours']:,.0f} hrs, {best_orders['metrics']['releasable_bvi_kits_qty']:,} qty
-        🔧 Malosa Kits: {best_orders['metrics']['releasable_malosa_kits_count']:,} orders, {best_orders['metrics']['releasable_malosa_kits_hours']:,.0f} hrs, {best_orders['metrics']['releasable_malosa_kits_qty']:,} qty
-        🔬 Manufacturing: {best_orders['metrics']['releasable_manufacturing_count']:,} orders, {best_orders['metrics']['releasable_manufacturing_hours']:,.0f} hrs, {best_orders['metrics']['releasable_manufacturing_qty']:,} qty
-        🔧 Assembly: {best_orders['metrics']['releasable_assembly_count']:,} orders, {best_orders['metrics']['releasable_assembly_hours']:,.0f} hrs, {best_orders['metrics']['releasable_assembly_qty']:,} qty
-        📦 Packaging: {best_orders['metrics']['releasable_packaging_count']:,} orders, {best_orders['metrics']['releasable_packaging_hours']:,.0f} hrs, {best_orders['metrics']['releasable_packaging_qty']:,} qty
-        🔬 Malosa Instruments: {best_orders['metrics']['releasable_malosa_instruments_count']:,} orders, {best_orders['metrics']['releasable_malosa_instruments_hours']:,.0f} hrs, {best_orders['metrics']['releasable_malosa_instruments_qty']:,} qty
-        🎵 Virtuoso: {best_orders['metrics']['releasable_virtuoso_count']:,} orders, {best_orders['metrics']['releasable_virtuoso_hours']:,.0f} hrs, {best_orders['metrics']['releasable_virtuoso_qty']:,} qty
+      → {best_orders['metrics']['releasable_count']:>6}/{best_orders['metrics']['total_orders']:>6} orders releasable ({best_orders['metrics']['releasable_count']/best_orders['metrics']['total_orders']*100:.1f}%)
+      
+      🔧 KITS:
+        BVI Kits:          {best_orders['metrics']['releasable_bvi_kits_count']:>6} orders,  {best_orders['metrics']['releasable_bvi_kits_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_bvi_kits_qty']:>8} qty
+        Malosa Kits:       {best_orders['metrics']['releasable_malosa_kits_count']:>6} orders,  {best_orders['metrics']['releasable_malosa_kits_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_malosa_kits_qty']:>8} qty
+              → {best_orders['metrics']['releasable_count']:>6}/{best_orders['metrics']['total_orders']:>6} orders releasable ({best_orders['metrics']['releasable_count']/best_orders['metrics']['total_orders']*100:.1f}%)
+        
+        🔧 KITS:
+        BVI Kits:          {best_orders['metrics']['releasable_bvi_kits_count']:>6} orders,  {best_orders['metrics']['releasable_bvi_kits_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_bvi_kits_qty']:>8} qty
+        Malosa Kits:       {best_orders['metrics']['releasable_malosa_kits_count']:>6} orders,  {best_orders['metrics']['releasable_malosa_kits_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_malosa_kits_qty']:>8} qty
+        Total Kits:        {best_orders['metrics']['releasable_kits_count']:>6} orders,  {best_orders['metrics']['releasable_kits_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_kits_qty']:>8} qty
+        
+        🔬 INSTRUMENTS:
+        Manufacturing:     {best_orders['metrics']['releasable_manufacturing_count']:>6} orders,  {best_orders['metrics']['releasable_manufacturing_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_manufacturing_qty']:>8} qty
+        Assembly:         {best_orders['metrics']['releasable_assembly_count']:>6} orders,  {best_orders['metrics']['releasable_assembly_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_assembly_qty']:>8} qty
+        Packaging:        {best_orders['metrics']['releasable_packaging_count']:>6} orders,  {best_orders['metrics']['releasable_packaging_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_packaging_qty']:>8} qty
+        Malosa Inst:      {best_orders['metrics']['releasable_malosa_instruments_count']:>6} orders,  {best_orders['metrics']['releasable_malosa_instruments_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_malosa_instruments_qty']:>8} qty
+        Total Instruments:{best_orders['metrics']['releasable_instruments_count']:>6} orders,  {best_orders['metrics']['releasable_instruments_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_instruments_qty']:>8} qty
+        
+        🎵 VIRTUOSO:
+        Virtuoso (3806):   {best_orders['metrics']['releasable_virtuoso_count']:>6} orders,  {best_orders['metrics']['releasable_virtuoso_hours']:>8.1f} hrs,  {best_orders['metrics']['releasable_virtuoso_qty']:>8} qty
 
    🏆 BEST STRATEGY (Hours): {best_hours['sorting_strategy']}
       → {best_hours['metrics']['releasable_hours']:,.0f}/{best_hours['metrics']['total_hours']:,.0f} hours releasable ({best_hours['metrics']['releasable_hours']/best_hours['metrics']['total_hours']*100:.1f}%)
@@ -1070,7 +1147,10 @@ def load_and_process_files():
    🔧 Assembly: {best_scenario['metrics']['releasable_assembly_count']:,} orders, {best_scenario['metrics']['releasable_assembly_hours']:,.0f} hrs, {best_scenario['metrics']['releasable_assembly_qty']:,} qty
    📦 Packaging: {best_scenario['metrics']['releasable_packaging_count']:,} orders, {best_scenario['metrics']['releasable_packaging_hours']:,.0f} hrs, {best_scenario['metrics']['releasable_packaging_qty']:,} qty
    🔬 Malosa Instruments: {best_scenario['metrics']['releasable_malosa_instruments_count']:,} orders, {best_scenario['metrics']['releasable_malosa_instruments_hours']:,.0f} hrs, {best_scenario['metrics']['releasable_malosa_instruments_qty']:,} qty
-   🎵 Virtuoso: {best_scenario['metrics']['releasable_virtuoso_count']:,} orders, {best_scenario['metrics']['releasable_virtuoso_hours']:,.0f} hrs, {best_scenario['metrics']['releasable_virtuoso_qty']:,} qty
+   📊 Total Instruments: {best_scenario['metrics']['releasable_instruments_count']:,} orders, {best_scenario['metrics']['releasable_instruments_hours']:,.0f} hrs, {best_scenario['metrics']['releasable_instruments_qty']:,} qty
+
+🎵 VIRTUOSO:
+   Virtuoso (3806): {best_scenario['metrics']['releasable_virtuoso_count']:,} orders, {best_scenario['metrics']['releasable_virtuoso_hours']:,.0f} hrs, {best_scenario['metrics']['releasable_virtuoso_qty']:,} qty
 
 📉 BASELINE: {os.path.basename(worst_scenario['filepath'])}
    ✅ {worst_scenario['metrics']['releasable_count']:,} releasable orders ({worst_scenario['metrics']['releasable_count']/worst_scenario['metrics']['total_orders']*100:.1f}%)
@@ -1090,28 +1170,30 @@ def load_and_process_files():
             summary_text = f"""✅ PROCESSING COMPLETE!
 
 📊 RESULTS SUMMARY:
-   Total Orders: {format_metric(safe_metric(metrics, 'total_orders'))}
-   ✅ Releasable: {format_metric(safe_metric(metrics, 'releasable_count'))} ({format_metric(safe_metric(metrics, 'releasable_count') / safe_metric(metrics, 'total_orders') * 100, 'percentage')})
-   ❌ On Hold: {format_metric(safe_metric(metrics, 'held_count'))} ({format_metric(safe_metric(metrics, 'held_count') / safe_metric(metrics, 'total_orders') * 100, 'percentage')})
-   🏷️ Piggyback: {format_metric(safe_metric(metrics, 'pb_count'))}
-   ⚠️ Skipped: {format_metric(safe_metric(metrics, 'skipped_count'))}
+   Total Orders:     {format_metric(safe_metric(metrics, 'total_orders')):>8}
+   ✅ Releasable:    {format_metric(safe_metric(metrics, 'releasable_count')):>8} ({format_metric(safe_metric(metrics, 'releasable_count') / safe_metric(metrics, 'total_orders') * 100, 'percentage')})
+   ❌ On Hold:       {format_metric(safe_metric(metrics, 'held_count')):>8} ({format_metric(safe_metric(metrics, 'held_count') / safe_metric(metrics, 'total_orders') * 100, 'percentage')})
+   🏷️ Piggyback:     {format_metric(safe_metric(metrics, 'pb_count')):>8}
+   ⚠️ Skipped:       {format_metric(safe_metric(metrics, 'skipped_count')):>8}
 
 🔧 RELEASABLE KITS:
-   BVI Kits (3001, 3801): {format_metric(safe_metric(metrics, 'releasable_bvi_kits_count'))} orders, {format_metric(safe_metric(metrics, 'releasable_bvi_kits_hours'), 'hours')} hrs, {format_metric(safe_metric(metrics, 'releasable_bvi_kits_qty'))} qty
-   Malosa Kits (5001): {format_metric(safe_metric(metrics, 'releasable_malosa_kits_count'))} orders, {format_metric(safe_metric(metrics, 'releasable_malosa_kits_hours'), 'hours')} hrs, {format_metric(safe_metric(metrics, 'releasable_malosa_kits_qty'))} qty
-   Total Kits: {format_metric(safe_metric(metrics, 'releasable_kits_count'))} orders, {format_metric(safe_metric(metrics, 'releasable_kits_hours'), 'hours')} hrs, {format_metric(safe_metric(metrics, 'releasable_kits_qty'))} qty
+   BVI Kits (3001, 3801):    {format_metric(safe_metric(metrics, 'releasable_bvi_kits_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_bvi_kits_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_bvi_kits_qty')):>8} qty
+   Malosa Kits (5001):       {format_metric(safe_metric(metrics, 'releasable_malosa_kits_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_malosa_kits_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_malosa_kits_qty')):>8} qty
+   Total Kits:               {format_metric(safe_metric(metrics, 'releasable_kits_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_kits_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_kits_qty')):>8} qty
 
 🔬 RELEASABLE INSTRUMENTS:
-   Manufacturing (3802): {format_metric(safe_metric(metrics, 'releasable_manufacturing_count'))} orders, {format_metric(safe_metric(metrics, 'releasable_manufacturing_hours'), 'hours')} hrs, {format_metric(safe_metric(metrics, 'releasable_manufacturing_qty'))} qty
-   Assembly (3803): {format_metric(safe_metric(metrics, 'releasable_assembly_count'))} orders, {format_metric(safe_metric(metrics, 'releasable_assembly_hours'), 'hours')} hrs, {format_metric(safe_metric(metrics, 'releasable_assembly_qty'))} qty
-   Packaging (3804): {format_metric(safe_metric(metrics, 'releasable_packaging_count'))} orders, {format_metric(safe_metric(metrics, 'releasable_packaging_hours'), 'hours')} hrs, {format_metric(safe_metric(metrics, 'releasable_packaging_qty'))} qty
-   Malosa Instruments (3805): {format_metric(safe_metric(metrics, 'releasable_malosa_instruments_count'))} orders, {format_metric(safe_metric(metrics, 'releasable_malosa_instruments_hours'), 'hours')} hrs, {format_metric(safe_metric(metrics, 'releasable_malosa_instruments_qty'))} qty
-   Virtuoso (3806): {format_metric(safe_metric(metrics, 'releasable_virtuoso_count'))} orders, {format_metric(safe_metric(metrics, 'releasable_virtuoso_hours'), 'hours')} hrs, {format_metric(safe_metric(metrics, 'releasable_virtuoso_qty'))} qty
-   Total Instruments: {format_metric(safe_metric(metrics, 'releasable_instruments_count'))} orders, {format_metric(safe_metric(metrics, 'releasable_instruments_hours'), 'hours')} hrs, {format_metric(safe_metric(metrics, 'releasable_instruments_qty'))} qty
+   Manufacturing (3802):     {format_metric(safe_metric(metrics, 'releasable_manufacturing_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_manufacturing_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_manufacturing_qty')):>8} qty
+   Assembly (3803):          {format_metric(safe_metric(metrics, 'releasable_assembly_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_assembly_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_assembly_qty')):>8} qty
+   Packaging (3804):         {format_metric(safe_metric(metrics, 'releasable_packaging_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_packaging_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_packaging_qty')):>8} qty
+   Malosa Instruments (3805):{format_metric(safe_metric(metrics, 'releasable_malosa_instruments_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_malosa_instruments_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_malosa_instruments_qty')):>8} qty
+   Total Instruments:        {format_metric(safe_metric(metrics, 'releasable_instruments_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_instruments_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_instruments_qty')):>8} qty
+
+🎵 RELEASABLE VIRTUOSO:
+   Virtuoso (3806):          {format_metric(safe_metric(metrics, 'releasable_virtuoso_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_virtuoso_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_virtuoso_qty')):>8} qty
 
 ⏱️ LABOR HOURS SUMMARY:
-   Total Hours: {format_metric(safe_metric(metrics, 'total_hours'), 'hours')}
-   ✅ Releasable Hours: {format_metric(safe_metric(metrics, 'releasable_hours'), 'hours')} ({format_metric(safe_metric(metrics, 'releasable_hours') / safe_metric(metrics, 'total_hours') * 100, 'percentage')})
+   Total Hours:              {format_metric(safe_metric(metrics, 'total_hours'), 'hours'):>8}
+   ✅ Releasable Hours:       {format_metric(safe_metric(metrics, 'releasable_hours'), 'hours'):>8} ({format_metric(safe_metric(metrics, 'releasable_hours') / safe_metric(metrics, 'total_hours') * 100, 'percentage')})
 
 ⏱️ PERFORMANCE METRICS:
    Processing Time: {processing_time:.2f} seconds
