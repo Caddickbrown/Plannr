@@ -427,62 +427,100 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     
     # Calculate Kit and Instrument metrics with subcategories
     releasable_results = df_results[df_results['Status'] == '✅ Release']
+    held_results = df_results[df_results['Status'] == '❌ Hold']
     
     # BVI Kits (Planner codes 3001, 3801)
     bvi_kit_planners = ['3001', '3801']
+    total_bvi_kits = df_results[df_results['Planner'].isin(bvi_kit_planners)]
     releasable_bvi_kits = releasable_results[releasable_results['Planner'].isin(bvi_kit_planners)]
+    total_bvi_kits_count = len(total_bvi_kits)
+    total_bvi_kits_hours = total_bvi_kits['Hours'].sum()
+    total_bvi_kits_qty = total_bvi_kits['Demand'].sum()
     releasable_bvi_kits_count = len(releasable_bvi_kits)
     releasable_bvi_kits_hours = releasable_bvi_kits['Hours'].sum()
     releasable_bvi_kits_qty = releasable_bvi_kits['Demand'].sum()
     
     # Malosa Kits (Planner code 5001)
     malosa_kit_planners = ['5001']
+    total_malosa_kits = df_results[df_results['Planner'].isin(malosa_kit_planners)]
     releasable_malosa_kits = releasable_results[releasable_results['Planner'].isin(malosa_kit_planners)]
+    total_malosa_kits_count = len(total_malosa_kits)
+    total_malosa_kits_hours = total_malosa_kits['Hours'].sum()
+    total_malosa_kits_qty = total_malosa_kits['Demand'].sum()
     releasable_malosa_kits_count = len(releasable_malosa_kits)
     releasable_malosa_kits_hours = releasable_malosa_kits['Hours'].sum()
     releasable_malosa_kits_qty = releasable_malosa_kits['Demand'].sum()
     
-    # Total Kits (for backward compatibility)
+    # Total Kits
+    total_kits_count = total_bvi_kits_count + total_malosa_kits_count
+    total_kits_hours = total_bvi_kits_hours + total_malosa_kits_hours
+    total_kits_qty = total_bvi_kits_qty + total_malosa_kits_qty
     releasable_kits_count = releasable_bvi_kits_count + releasable_malosa_kits_count
     releasable_kits_hours = releasable_bvi_kits_hours + releasable_malosa_kits_hours
     releasable_kits_qty = releasable_bvi_kits_qty + releasable_malosa_kits_qty
     
     # Manufacturing (Planner code 3802)
     manufacturing_planners = ['3802']
+    total_manufacturing = df_results[df_results['Planner'].isin(manufacturing_planners)]
     releasable_manufacturing = releasable_results[releasable_results['Planner'].isin(manufacturing_planners)]
+    total_manufacturing_count = len(total_manufacturing)
+    total_manufacturing_hours = total_manufacturing['Hours'].sum()
+    total_manufacturing_qty = total_manufacturing['Demand'].sum()
     releasable_manufacturing_count = len(releasable_manufacturing)
     releasable_manufacturing_hours = releasable_manufacturing['Hours'].sum()
     releasable_manufacturing_qty = releasable_manufacturing['Demand'].sum()
     
     # Assembly (Planner code 3803)
     assembly_planners = ['3803']
+    total_assembly = df_results[df_results['Planner'].isin(assembly_planners)]
     releasable_assembly = releasable_results[releasable_results['Planner'].isin(assembly_planners)]
+    total_assembly_count = len(total_assembly)
+    total_assembly_hours = total_assembly['Hours'].sum()
+    total_assembly_qty = total_assembly['Demand'].sum()
     releasable_assembly_count = len(releasable_assembly)
     releasable_assembly_hours = releasable_assembly['Hours'].sum()
     releasable_assembly_qty = releasable_assembly['Demand'].sum()
     
     # Packaging (Planner code 3804)
     packaging_planners = ['3804']
+    total_packaging = df_results[df_results['Planner'].isin(packaging_planners)]
     releasable_packaging = releasable_results[releasable_results['Planner'].isin(packaging_planners)]
+    total_packaging_count = len(total_packaging)
+    total_packaging_hours = total_packaging['Hours'].sum()
+    total_packaging_qty = total_packaging['Demand'].sum()
     releasable_packaging_count = len(releasable_packaging)
     releasable_packaging_hours = releasable_packaging['Hours'].sum()
     releasable_packaging_qty = releasable_packaging['Demand'].sum()
     
     # Malosa Instruments (Planner code 3805)
     malosa_instrument_planners = ['3805']
+    total_malosa_instruments = df_results[df_results['Planner'].isin(malosa_instrument_planners)]
     releasable_malosa_instruments = releasable_results[releasable_results['Planner'].isin(malosa_instrument_planners)]
+    total_malosa_instruments_count = len(total_malosa_instruments)
+    total_malosa_instruments_hours = total_malosa_instruments['Hours'].sum()
+    total_malosa_instruments_qty = total_malosa_instruments['Demand'].sum()
     releasable_malosa_instruments_count = len(releasable_malosa_instruments)
     releasable_malosa_instruments_hours = releasable_malosa_instruments['Hours'].sum()
     releasable_malosa_instruments_qty = releasable_malosa_instruments['Demand'].sum()
     
     # Virtuoso (Planner code 3806)
     virtuoso_planners = ['3806']
+    total_virtuoso = df_results[df_results['Planner'].isin(virtuoso_planners)]
     releasable_virtuoso = releasable_results[releasable_results['Planner'].isin(virtuoso_planners)]
+    total_virtuoso_count = len(total_virtuoso)
+    total_virtuoso_hours = total_virtuoso['Hours'].sum()
+    total_virtuoso_qty = total_virtuoso['Demand'].sum()
     releasable_virtuoso_count = len(releasable_virtuoso)
     releasable_virtuoso_hours = releasable_virtuoso['Hours'].sum()
     releasable_virtuoso_qty = releasable_virtuoso['Demand'].sum()
     
-    # Total Instruments (sum of all instrument categories)
+    # Total Instruments
+    total_instruments_count = (total_manufacturing_count + total_assembly_count + 
+                             total_packaging_count + total_malosa_instruments_count)
+    total_instruments_hours = (total_manufacturing_hours + total_assembly_hours + 
+                             total_packaging_hours + total_malosa_instruments_hours)
+    total_instruments_qty = (total_manufacturing_qty + total_assembly_qty + 
+                           total_packaging_qty + total_malosa_instruments_qty)
     releasable_instruments_count = (releasable_manufacturing_count + releasable_assembly_count + 
                                   releasable_packaging_count + releasable_malosa_instruments_count)
     releasable_instruments_hours = (releasable_manufacturing_hours + releasable_assembly_hours + 
@@ -509,35 +547,63 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
             'releasable_qty': releasable_qty,
             'held_qty': held_qty,
             '---2': '---',
+            'total_kits_count': total_kits_count,
+            'total_kits_hours': total_kits_hours,
+            'total_kits_qty': total_kits_qty,
             'releasable_kits_count': releasable_kits_count,
             'releasable_kits_hours': releasable_kits_hours,
             'releasable_kits_qty': releasable_kits_qty,
+            'total_bvi_kits_count': total_bvi_kits_count,
+            'total_bvi_kits_hours': total_bvi_kits_hours,
+            'total_bvi_kits_qty': total_bvi_kits_qty,
             'releasable_bvi_kits_count': releasable_bvi_kits_count,
             'releasable_bvi_kits_hours': releasable_bvi_kits_hours,
             'releasable_bvi_kits_qty': releasable_bvi_kits_qty,
+            'total_malosa_kits_count': total_malosa_kits_count,
+            'total_malosa_kits_hours': total_malosa_kits_hours,
+            'total_malosa_kits_qty': total_malosa_kits_qty,
             'releasable_malosa_kits_count': releasable_malosa_kits_count,
             'releasable_malosa_kits_hours': releasable_malosa_kits_hours,
             'releasable_malosa_kits_qty': releasable_malosa_kits_qty,
             '---3': '---',
+            'total_instruments_count': total_instruments_count,
+            'total_instruments_hours': total_instruments_hours,
+            'total_instruments_qty': total_instruments_qty,
             'releasable_instruments_count': releasable_instruments_count,
             'releasable_instruments_hours': releasable_instruments_hours,
             'releasable_instruments_qty': releasable_instruments_qty,
+            'total_manufacturing_count': total_manufacturing_count,
+            'total_manufacturing_hours': total_manufacturing_hours,
+            'total_manufacturing_qty': total_manufacturing_qty,
             'releasable_manufacturing_count': releasable_manufacturing_count,
             'releasable_manufacturing_hours': releasable_manufacturing_hours,
             'releasable_manufacturing_qty': releasable_manufacturing_qty,
+            'total_assembly_count': total_assembly_count,
+            'total_assembly_hours': total_assembly_hours,
+            'total_assembly_qty': total_assembly_qty,
             'releasable_assembly_count': releasable_assembly_count,
             'releasable_assembly_hours': releasable_assembly_hours,
             'releasable_assembly_qty': releasable_assembly_qty,
+            'total_packaging_count': total_packaging_count,
+            'total_packaging_hours': total_packaging_hours,
+            'total_packaging_qty': total_packaging_qty,
             'releasable_packaging_count': releasable_packaging_count,
             'releasable_packaging_hours': releasable_packaging_hours,
             'releasable_packaging_qty': releasable_packaging_qty,
+            'total_malosa_instruments_count': total_malosa_instruments_count,
+            'total_malosa_instruments_hours': total_malosa_instruments_hours,
+            'total_malosa_instruments_qty': total_malosa_instruments_qty,
             'releasable_malosa_instruments_count': releasable_malosa_instruments_count,
             'releasable_malosa_instruments_hours': releasable_malosa_instruments_hours,
             'releasable_malosa_instruments_qty': releasable_malosa_instruments_qty,
+            '---4': '---',
+            'total_virtuoso_count': total_virtuoso_count,
+            'total_virtuoso_hours': total_virtuoso_hours,
+            'total_virtuoso_qty': total_virtuoso_qty,
             'releasable_virtuoso_count': releasable_virtuoso_count,
             'releasable_virtuoso_hours': releasable_virtuoso_hours,
             'releasable_virtuoso_qty': releasable_virtuoso_qty,
-            '---4': '---',
+            '---5': '---',
             'committed_parts_count': committed_parts_count,
             'total_committed_qty': total_committed_qty
         }
@@ -804,7 +870,7 @@ def load_and_process_files():
                 ('Processing Mode', "Min/Max Optimization" if minmax_mode else "Standard"),
                 ('Files Processed Count', len(files_processed_list_for_summary)),
                 ('Strategies Tested / Scenarios', len(scenarios_for_comparison) if minmax_mode else len(scenarios)),
-                ('Optimal Strategies / Scenarios Saved', len(scenarios)), # In minmax, 'scenarios' has BEST_xxx. In standard, it's all scenarios.
+                ('Optimal Strategies / Scenarios Saved', len(scenarios)),
                 ('--- Overall Performance ---', '---'),
                 ('Total Orders Processed', f"{total_orders_processed:,}"),
                 ('Total Demand Quantity', f"{source_metrics.get('total_qty', 0):,}"),
@@ -812,35 +878,63 @@ def load_and_process_files():
                 ('Releasable Orders', f"{source_metrics.get('releasable_count', 0):,}"),
                 ('Releasable Quantity', f"{source_metrics.get('releasable_qty', 0):,.1f}"),
                 ('Releasable Hours', f"{source_metrics.get('releasable_hours', 0):,.1f}"),
+                ('--- Total Kits Processed ---', '---'),
+                ('Total Kits Processed (Orders)', f"{source_metrics.get('total_kits_count', 0):,}"),
+                ('Total Kits Processed (Hours)', f"{source_metrics.get('total_kits_hours', 0):,.1f}"),
+                ('Total Kits Processed (Quantity)', f"{source_metrics.get('total_kits_qty', 0):,}"),
                 ('--- Releasable Kits Breakdown ---', '---'),
                 ('Total Releasable Kits (Orders)', f"{source_metrics.get('releasable_kits_count', 0):,}"),
                 ('Total Releasable Kits (Hours)', f"{source_metrics.get('releasable_kits_hours', 0):,.1f}"),
                 ('Total Releasable Kits (Quantity)', f"{source_metrics.get('releasable_kits_qty', 0):,}"),
+                ('Kits Release Rate (Orders %)', f"{source_metrics.get('releasable_kits_count', 0)/source_metrics.get('total_kits_count', 1)*100:.1f}%" if source_metrics.get('total_kits_count', 0) > 0 else "0%"),
+                ('Kits Release Rate (Hours %)', f"{source_metrics.get('releasable_kits_hours', 0)/source_metrics.get('total_kits_hours', 1)*100:.1f}%" if source_metrics.get('total_kits_hours', 0) > 0 else "0%"),
+                ('Kits Release Rate (Quantity %)', f"{source_metrics.get('releasable_kits_qty', 0)/source_metrics.get('total_kits_qty', 1)*100:.1f}%" if source_metrics.get('total_kits_qty', 0) > 0 else "0%"),
                 ('  BVI Kits (Orders)', f"{source_metrics.get('releasable_bvi_kits_count', 0):,}"),
                 ('  BVI Kits (Hours)', f"{source_metrics.get('releasable_bvi_kits_hours', 0):,.1f}"),
                 ('  BVI Kits (Quantity)', f"{source_metrics.get('releasable_bvi_kits_qty', 0):,}"),
+                ('  BVI Kits Release Rate (%)', f"{source_metrics.get('releasable_bvi_kits_count', 0)/source_metrics.get('total_bvi_kits_count', 1)*100:.1f}%" if source_metrics.get('total_bvi_kits_count', 0) > 0 else "0%"),
                 ('  Malosa Kits (Orders)', f"{source_metrics.get('releasable_malosa_kits_count', 0):,}"),
                 ('  Malosa Kits (Hours)', f"{source_metrics.get('releasable_malosa_kits_hours', 0):,.1f}"),
                 ('  Malosa Kits (Quantity)', f"{source_metrics.get('releasable_malosa_kits_qty', 0):,}"),
+                ('  Malosa Kits Release Rate (%)', f"{source_metrics.get('releasable_malosa_kits_count', 0)/source_metrics.get('total_malosa_kits_count', 1)*100:.1f}%" if source_metrics.get('total_malosa_kits_count', 0) > 0 else "0%"),
+                ('--- Total Instruments Processed ---', '---'),
+                ('Total Instruments Processed (Orders)', f"{source_metrics.get('total_instruments_count', 0):,}"),
+                ('Total Instruments Processed (Hours)', f"{source_metrics.get('total_instruments_hours', 0):,.1f}"),
+                ('Total Instruments Processed (Quantity)', f"{source_metrics.get('total_instruments_qty', 0):,}"),
                 ('--- Releasable Instruments Breakdown ---', '---'),
                 ('Total Releasable Instruments (Orders)', f"{source_metrics.get('releasable_instruments_count', 0):,}"),
                 ('Total Releasable Instruments (Hours)', f"{source_metrics.get('releasable_instruments_hours', 0):,.1f}"),
                 ('Total Releasable Instruments (Quantity)', f"{source_metrics.get('releasable_instruments_qty', 0):,}"),
+                ('Instruments Release Rate (Orders %)', f"{source_metrics.get('releasable_instruments_count', 0)/source_metrics.get('total_instruments_count', 1)*100:.1f}%" if source_metrics.get('total_instruments_count', 0) > 0 else "0%"),
+                ('Instruments Release Rate (Hours %)', f"{source_metrics.get('releasable_instruments_hours', 0)/source_metrics.get('total_instruments_hours', 1)*100:.1f}%" if source_metrics.get('total_instruments_hours', 0) > 0 else "0%"),
+                ('Instruments Release Rate (Quantity %)', f"{source_metrics.get('releasable_instruments_qty', 0)/source_metrics.get('total_instruments_qty', 1)*100:.1f}%" if source_metrics.get('total_instruments_qty', 0) > 0 else "0%"),
                 ('  Manufacturing (3802 Orders)', f"{source_metrics.get('releasable_manufacturing_count', 0):,}"),
                 ('  Manufacturing (3802 Hours)', f"{source_metrics.get('releasable_manufacturing_hours', 0):,.1f}"),
                 ('  Manufacturing (3802 Quantity)', f"{source_metrics.get('releasable_manufacturing_qty', 0):,}"),
+                ('  Manufacturing Release Rate (%)', f"{source_metrics.get('releasable_manufacturing_count', 0)/source_metrics.get('total_manufacturing_count', 1)*100:.1f}%" if source_metrics.get('total_manufacturing_count', 0) > 0 else "0%"),
                 ('  Assembly (3803 Orders)', f"{source_metrics.get('releasable_assembly_count', 0):,}"),
                 ('  Assembly (3803 Hours)', f"{source_metrics.get('releasable_assembly_hours', 0):,.1f}"),
                 ('  Assembly (3803 Quantity)', f"{source_metrics.get('releasable_assembly_qty', 0):,}"),
+                ('  Assembly Release Rate (%)', f"{source_metrics.get('releasable_assembly_count', 0)/source_metrics.get('total_assembly_count', 1)*100:.1f}%" if source_metrics.get('total_assembly_count', 0) > 0 else "0%"),
                 ('  Packaging (3804 Orders)', f"{source_metrics.get('releasable_packaging_count', 0):,}"),
                 ('  Packaging (3804 Hours)', f"{source_metrics.get('releasable_packaging_hours', 0):,.1f}"),
                 ('  Packaging (3804 Quantity)', f"{source_metrics.get('releasable_packaging_qty', 0):,}"),
+                ('  Packaging Release Rate (%)', f"{source_metrics.get('releasable_packaging_count', 0)/source_metrics.get('total_packaging_count', 1)*100:.1f}%" if source_metrics.get('total_packaging_count', 0) > 0 else "0%"),
                 ('  Malosa Instruments (3805 Orders)', f"{source_metrics.get('releasable_malosa_instruments_count', 0):,}"),
                 ('  Malosa Instruments (3805 Hours)', f"{source_metrics.get('releasable_malosa_instruments_hours', 0):,.1f}"),
                 ('  Malosa Instruments (3805 Quantity)', f"{source_metrics.get('releasable_malosa_instruments_qty', 0):,}"),
-                ('  Virtuoso (3806 Orders)', f"{source_metrics.get('releasable_virtuoso_count', 0):,}"),
-                ('  Virtuoso (3806 Hours)', f"{source_metrics.get('releasable_virtuoso_hours', 0):,.1f}"),
-                ('  Virtuoso (3806 Quantity)', f"{source_metrics.get('releasable_virtuoso_qty', 0):,}"),
+                ('  Malosa Instruments Release Rate (%)', f"{source_metrics.get('releasable_malosa_instruments_count', 0)/source_metrics.get('total_malosa_instruments_count', 1)*100:.1f}%" if source_metrics.get('total_malosa_instruments_count', 0) > 0 else "0%"),
+                ('--- Total Virtuoso Processed ---', '---'),
+                ('Total Virtuoso Processed (Orders)', f"{source_metrics.get('total_virtuoso_count', 0):,}"),
+                ('Total Virtuoso Processed (Hours)', f"{source_metrics.get('total_virtuoso_hours', 0):,.1f}"),
+                ('Total Virtuoso Processed (Quantity)', f"{source_metrics.get('total_virtuoso_qty', 0):,}"),
+                ('--- Releasable Virtuoso Breakdown ---', '---'),
+                ('Releasable Virtuoso (Orders)', f"{source_metrics.get('releasable_virtuoso_count', 0):,}"),
+                ('Releasable Virtuoso (Hours)', f"{source_metrics.get('releasable_virtuoso_hours', 0):,.1f}"),
+                ('Releasable Virtuoso (Quantity)', f"{source_metrics.get('releasable_virtuoso_qty', 0):,}"),
+                ('Virtuoso Release Rate (Orders %)', f"{source_metrics.get('releasable_virtuoso_count', 0)/source_metrics.get('total_virtuoso_count', 1)*100:.1f}%" if source_metrics.get('total_virtuoso_count', 0) > 0 else "0%"),
+                ('Virtuoso Release Rate (Hours %)', f"{source_metrics.get('releasable_virtuoso_hours', 0)/source_metrics.get('total_virtuoso_hours', 1)*100:.1f}%" if source_metrics.get('total_virtuoso_hours', 0) > 0 else "0%"),
+                ('Virtuoso Release Rate (Quantity %)', f"{source_metrics.get('releasable_virtuoso_qty', 0)/source_metrics.get('total_virtuoso_qty', 1)*100:.1f}%" if source_metrics.get('total_virtuoso_qty', 0) > 0 else "0%"),
                 ('--- Processing Performance ---', '---'),
                 ('Total Processing Time (seconds)', f"{processing_time:.2f}"),
                 ('Processing Speed (orders/second)', f"{orders_per_second:.1f}"),
