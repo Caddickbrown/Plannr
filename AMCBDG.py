@@ -5,6 +5,8 @@ import os
 import time
 from datetime import datetime
 import openpyxl
+from openpyxl.styles import PatternFill, Font
+from openpyxl.utils import get_column_letter
 
 # VERSION INFO
 VERSION = "v1.8.1"
@@ -72,7 +74,7 @@ def build_stock_dictionary(df_ipis):
     
     return stock
 
-def process_single_scenario(filepath, scenario_name, status_callback=None, scenario_num=1, total_scenarios=1, sorting_strategy=None):
+def process_single_scenario(filepath, scenario_name, status_callback=None, scenario_num=1, total_scenarios=1, sorting_strategy=None, include_kits=True, include_instruments=True, include_virtuoso=True):
     """Process a single scenario file and return results with live progress updates"""
     
     if status_callback:
@@ -141,8 +143,37 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     df_main["Planner"] = df_main["Planner"].fillna("UNKNOWN").astype(str)
     df_main["Demand"] = pd.to_numeric(df_main["Demand"], errors='coerce').fillna(0)
     
+    # Filter data based on selected categories
+    filtered_df_main = df_main.copy()
+    
+    # Define planner codes for each category
+    kits_planners = ['3001', '3801', '5001']  # BVI Kits (3001, 3801) + Malosa Kits (5001)
+    instruments_planners = ['3802', '3803', '3804', '3805']  # Manufacturing, Assembly, Packaging, Malosa Instruments
+    virtuoso_planners = ['3806']  # Virtuoso
+    
+    # Build filter mask based on selected categories
+    filter_mask = pd.Series([False] * len(df_main), index=df_main.index)
+    
+    if include_kits:
+        filter_mask |= df_main['Planner'].isin(kits_planners)
+    
+    if include_instruments:
+        filter_mask |= df_main['Planner'].isin(instruments_planners)
+    
+    if include_virtuoso:
+        filter_mask |= df_main['Planner'].isin(virtuoso_planners)
+    
+    # Apply filter
+    filtered_df_main = df_main[filter_mask].copy()
+    
+    if status_callback:
+        total_original = len(df_main)
+        total_filtered = len(filtered_df_main)
+        excluded = total_original - total_filtered
+        status_callback(f"🔁 [Scenario {scenario_num}/{total_scenarios}] Filtered data: {total_filtered:,}/{total_original:,} orders selected ({excluded:,} excluded) ({strategy_name})...")
+    
     # Calculate hours for sorting (unchanged)
-    df_main["Hours_Calc"] = df_main.apply(lambda row: 
+    filtered_df_main["Hours_Calc"] = filtered_df_main.apply(lambda row: 
         labor_standards.get(str(row["Part"]), 0) * row["Demand"], axis=1)
     
     # Apply sorting strategy (unchanged)
@@ -151,28 +182,28 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
         for col in sorting_strategy["columns"]:
             if col == "Start Date":
                 # Put NaT (missing dates) at the end
-                df_main = df_main.sort_values(sorting_strategy["columns"], 
+                filtered_df_main = filtered_df_main.sort_values(sorting_strategy["columns"], 
                                             ascending=sorting_strategy["ascending"], 
                                             na_position='last')
             else:
-                df_main = df_main.sort_values(sorting_strategy["columns"], 
+                filtered_df_main = filtered_df_main.sort_values(sorting_strategy["columns"], 
                                             ascending=sorting_strategy["ascending"])
     else:
         # Default sorting (original behavior)
-        df_main = df_main.sort_values(['Start Date', 'SO Number'], na_position='last')
+        filtered_df_main = filtered_df_main.sort_values(['Start Date', 'SO Number'], na_position='last')
     
-    df_main = df_main.reset_index(drop=True)
+    filtered_df_main = filtered_df_main.reset_index(drop=True)
     
     results = []
     processed = 0
-    total = len(df_main)
+    total = len(filtered_df_main)
     
     # Baseline estimate: ~0.15 seconds per order (conservative estimate)
     baseline_time_per_order = 0.15
     processing_start_time = time.time()
 
     # Process each order sequentially with FREQUENT UI updates + TIME ESTIMATES
-    for _, row in df_main.iterrows():
+    for _, row in filtered_df_main.iterrows():
         processed += 1
         
         # UPDATE UI EVERY 100 ORDERS
@@ -663,7 +694,10 @@ def load_and_process_files():
                     scenario_start_time = time.time()
                     scenario_result = process_single_scenario(
                         filepath, scenario_name, update_progress, 
-                        scenario_num, total_scenarios, strategy
+                        scenario_num, total_scenarios, strategy,
+                        include_kits=include_kits_var.get(),
+                        include_instruments=include_instruments_var.get(),
+                        include_virtuoso=include_virtuoso_var.get()
                     )
                     scenario_end_time = time.time()
                     scenario_duration = scenario_end_time - scenario_start_time
@@ -749,7 +783,12 @@ def load_and_process_files():
                 
                 # Process with live progress updates
                 scenario_start_time = time.time()
-                scenario_result = process_single_scenario(filepath, scenario_name, update_progress, scenario_num, len(filepaths))
+                scenario_result = process_single_scenario(
+                    filepath, scenario_name, update_progress, scenario_num, len(filepaths),
+                    include_kits=include_kits_var.get(),
+                    include_instruments=include_instruments_var.get(),
+                    include_virtuoso=include_virtuoso_var.get()
+                )
                 scenario_end_time = time.time()
                 scenario_duration = scenario_end_time - scenario_start_time
                 
@@ -871,6 +910,10 @@ def load_and_process_files():
                 ('Files Processed Count', len(files_processed_list_for_summary)),
                 ('Strategies Tested / Scenarios', len(scenarios_for_comparison) if minmax_mode else len(scenarios)),
                 ('Optimal Strategies / Scenarios Saved', len(scenarios)),
+                ('--- Material Categories Processed ---', '---'),
+                ('Kits Included', "Yes" if include_kits_var.get() else "No"),
+                ('Instruments Included', "Yes" if include_instruments_var.get() else "No"),
+                ('Virtuoso Included', "Yes" if include_virtuoso_var.get() else "No"),
                 ('--- Overall Performance ---', '---'),
                 ('Total Orders Processed', f"{total_orders_processed:,}"),
                 ('Total Demand Quantity', f"{source_metrics.get('total_qty', 0):,}"),
@@ -1002,9 +1045,9 @@ def load_and_process_files():
             # Write everything to Excel in a single writer session
             with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
                 # Define styles once at the start
-                header_fill = openpyxl.styles.PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
-                separator_fill = openpyxl.styles.PatternFill(start_color='F5F5F5', end_color='F5F5F5', fill_type='solid')
-                bold_font = openpyxl.styles.Font(bold=True)
+                header_fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+                separator_fill = PatternFill(start_color='F5F5F5', end_color='F5F5F5', fill_type='solid')
+                bold_font = Font(bold=True)
 
                 # Write each scenario to its own sheet first
                 for scenario in scenarios:
@@ -1021,7 +1064,7 @@ def load_and_process_files():
                     # Get the worksheet and apply number formats
                     worksheet = writer.sheets[sheet_name]
                     for idx, col in enumerate(df.columns, 1):
-                        col_letter = openpyxl.utils.get_column_letter(idx)
+                        col_letter = get_column_letter(idx)
                         if col == 'Hours':
                             # Format hours with 1 decimal place
                             for cell in worksheet[col_letter][1:]:
@@ -1112,7 +1155,7 @@ def load_and_process_files():
                     
                     # Apply number formats to all cells in numeric columns
                     for col_idx, col_name in enumerate(comparison_df_formatted.columns, 1):
-                        col_letter = openpyxl.utils.get_column_letter(col_idx)
+                        col_letter = get_column_letter(col_idx)
                         
                         if col_name in pct_columns:
                             # Format as percentage
@@ -1135,7 +1178,7 @@ def load_and_process_files():
                         
                         # Auto-adjust column width
                         max_length = 0
-                        column = [cell for cell in comp_worksheet[openpyxl.utils.get_column_letter(col)]]
+                        column = [cell for cell in comp_worksheet[get_column_letter(col)]]
                         for cell in column:
                             try:
                                 if len(str(cell.value)) > max_length:
@@ -1143,7 +1186,7 @@ def load_and_process_files():
                             except:
                                 pass
                             adjusted_width = min((max_length + 2), 50)  # Cap width at 50
-                            comp_worksheet.column_dimensions[openpyxl.utils.get_column_letter(col)].width = adjusted_width
+                            comp_worksheet.column_dimensions[get_column_letter(col)].width = adjusted_width
         else:
             output_file = None  # No file created
 
@@ -1159,6 +1202,11 @@ def load_and_process_files():
    Sorting Strategies Tested: {len(get_sorting_strategies())}
    Total Strategy Tests: {len(scenarios_for_comparison)}
    Best Strategies Saved: {len(scenarios)} individual sheets (3 per file: Orders, Hours, Qty)
+
+🔧 MATERIAL CATEGORIES PROCESSED:
+   Kits (3001, 3801, 5001): {'✓ Included' if include_kits_var.get() else '✗ Excluded'}
+   Instruments (3802, 3803, 3804, 3805): {'✓ Included' if include_instruments_var.get() else '✗ Excluded'}
+   Virtuoso (3806): {'✓ Included' if include_virtuoso_var.get() else '✗ Excluded'}
 
 """
             
@@ -1233,6 +1281,11 @@ def load_and_process_files():
 
 📊 SCENARIOS COMPARED: {len(scenarios)}
 
+🔧 MATERIAL CATEGORIES PROCESSED:
+   Kits (3001, 3801, 5001): {'✓ Included' if include_kits_var.get() else '✗ Excluded'}
+   Instruments (3802, 3803, 3804, 3805): {'✓ Included' if include_instruments_var.get() else '✗ Excluded'}
+   Virtuoso (3806): {'✓ Included' if include_virtuoso_var.get() else '✗ Excluded'}
+
 🏆 BEST PERFORMER: {os.path.basename(best_scenario['filepath'])}
    ✅ {best_scenario['metrics']['releasable_count']:,} releasable orders ({best_scenario['metrics']['releasable_count']/best_scenario['metrics']['total_orders']*100:.1f}%)
    🔧 BVI Kits: {best_scenario['metrics']['releasable_bvi_kits_count']:,} orders, {best_scenario['metrics']['releasable_bvi_kits_hours']:,.0f} hrs, {best_scenario['metrics']['releasable_bvi_kits_qty']:,} qty
@@ -1269,6 +1322,11 @@ def load_and_process_files():
    ❌ On Hold:       {format_metric(safe_metric(metrics, 'held_count')):>8} ({format_metric(safe_metric(metrics, 'held_count') / safe_metric(metrics, 'total_orders') * 100, 'percentage')})
    🏷️ Piggyback:     {format_metric(safe_metric(metrics, 'pb_count')):>8}
    ⚠️ Skipped:       {format_metric(safe_metric(metrics, 'skipped_count')):>8}
+
+🔧 MATERIAL CATEGORIES PROCESSED:
+   Kits (3001, 3801, 5001): {'✓ Included' if include_kits_var.get() else '✗ Excluded'}
+   Instruments (3802, 3803, 3804, 3805): {'✓ Included' if include_instruments_var.get() else '✗ Excluded'}
+   Virtuoso (3806): {'✓ Included' if include_virtuoso_var.get() else '✗ Excluded'}
 
 🔧 RELEASABLE KITS:
    BVI Kits (3001, 3801):    {format_metric(safe_metric(metrics, 'releasable_bvi_kits_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_bvi_kits_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_bvi_kits_qty')):>8} qty
@@ -1332,7 +1390,7 @@ root.geometry("600x650")
 
 # Main frame
 main_frame = ttk.Frame(root, padding="20")
-main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+main_frame.grid(row=0, column=0, sticky="nsew")
 
 # Title
 title_label = ttk.Label(main_frame, text=f"PlanSnap {VERSION}", 
@@ -1347,7 +1405,8 @@ version_label.grid(row=1, column=0, pady=(0, 15))
 # Instructions
 instructions = """• Select MULTIPLE files to compare different scenarios (hold Ctrl)
 • Enable Min/Max Optimization to find the best sorting strategy for each file
-• Use Quick Analysis Mode for faster results without Excel export"""
+• Use Quick Analysis Mode for faster results without Excel export
+• Select specific material categories to process (Kits, Instruments, Virtuoso)"""
 
 inst_label = ttk.Label(main_frame, text=instructions, justify=tk.LEFT, wraplength=700)
 inst_label.grid(row=2, column=0, pady=(0, 20))
@@ -1394,11 +1453,56 @@ no_export_tooltip = ttk.Label(
 )
 no_export_tooltip.grid(row=1, column=0, pady=(0, 10))
 
+# Material Category Selection
+material_frame = ttk.LabelFrame(main_frame, text="🔧 Material Categories to Process", padding="10")
+material_frame.grid(row=5, column=0, pady=(0, 10), sticky="ew")
+
+# Create variables for material category checkboxes
+include_kits_var = tk.BooleanVar(value=True)
+include_instruments_var = tk.BooleanVar(value=True)
+include_virtuoso_var = tk.BooleanVar(value=True)
+
+# Kits checkbox
+kits_checkbox = ttk.Checkbutton(
+    material_frame,
+    text="🔧 Kits (Planner codes: 3001, 3801, 5001)",
+    variable=include_kits_var,
+    style='Big.TCheckbutton'
+)
+kits_checkbox.grid(row=0, column=0, sticky=tk.W, pady=(0, 5))
+
+# Instruments checkbox
+instruments_checkbox = ttk.Checkbutton(
+    material_frame,
+    text="🔬 Instruments (Planner codes: 3802, 3803, 3804, 3805)",
+    variable=include_instruments_var,
+    style='Big.TCheckbutton'
+)
+instruments_checkbox.grid(row=1, column=0, sticky=tk.W, pady=(0, 5))
+
+# Virtuoso checkbox
+virtuoso_checkbox = ttk.Checkbutton(
+    material_frame,
+    text="🎵 Virtuoso (Planner code: 3806)",
+    variable=include_virtuoso_var,
+    style='Big.TCheckbutton'
+)
+virtuoso_checkbox.grid(row=2, column=0, sticky=tk.W, pady=(0, 5))
+
+# Material categories tooltip
+material_tooltip = ttk.Label(
+    material_frame,
+    text="Untick categories to exclude them from material availability checks",
+    font=('Arial', 8, 'italic'),
+    foreground='gray'
+)
+material_tooltip.grid(row=3, column=0, pady=(5, 0), sticky=tk.W)
+
 # Process button
 process_btn = ttk.Button(main_frame, text="📂 SELECT FILES & PROCESS", 
                         command=load_and_process_files, 
                         style='Big.TButton')
-process_btn.grid(row=5, column=0, pady=(10, 20))
+process_btn.grid(row=6, column=0, pady=(10, 20))
 
 # Configure button style
 style = ttk.Style()
@@ -1410,27 +1514,28 @@ style.configure('Success.TFrame', background='#7ff09a')
 status_var = tk.StringVar()
 status_var.set("🔄 Ready - Select Excel file(s) to begin processing")
 status_label = ttk.Label(main_frame, textvariable=status_var, font=('Arial', 10))
-status_label.grid(row=6, column=0, pady=(0, 10), sticky=tk.W)
+status_label.grid(row=7, column=0, pady=(0, 10), sticky=tk.W)
 
 # Results area
 results_frame = ttk.LabelFrame(main_frame, text="📊 Results", padding="10")
-results_frame.grid(row=7, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(10, 0))
+results_frame.grid(row=8, column=0, sticky="nsew", pady=(10, 0))
 
 results_text = tk.Text(results_frame, height=18, width=90, font=('Consolas', 9))
 scrollbar = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=results_text.yview)
+
 results_text.configure(yscrollcommand=scrollbar.set)
 
-results_text.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
-scrollbar.grid(row=0, column=1, sticky=(tk.N, tk.S))
+results_text.grid(row=0, column=0, sticky="nsew")
+scrollbar.grid(row=0, column=1, sticky="ns")
 
 copy_btn = ttk.Button(main_frame, text="📋 Copy Summary", command=copy_summary_to_clipboard)
-copy_btn.grid(row=8, column=0, pady=(10, 10))
+copy_btn.grid(row=9, column=0, pady=(10, 10))
 
 # Configure grid weights
 root.columnconfigure(0, weight=1)
 root.rowconfigure(0, weight=1)
 main_frame.columnconfigure(0, weight=1)
-main_frame.rowconfigure(7, weight=1)
+main_frame.rowconfigure(8, weight=1)
 results_frame.columnconfigure(0, weight=1)
 results_frame.rowconfigure(0, weight=1)
 
