@@ -9,24 +9,77 @@ from openpyxl.styles import PatternFill, Font
 from openpyxl.utils import get_column_letter
 
 # VERSION INFO
-VERSION = "v1.8.1"
-VERSION_DATE = "2025-06-05"
+VERSION = "v1.9.0"
+VERSION_DATE = "2025-07-30"
 DEBUG_MODE = False
-DEBUG_COMPONENT_PART = 8029831  # Set to a specific part number (as string) to track, e.g. "8029831"
-DEBUG_SO_NUMBER = None      # Set to a specific SO number (as string) to track, e.g. "9678417"
+DEBUG_COMPONENT_PART = None  # Set to a specific part number (as string) to track, e.g. "8034855"
+DEBUG_SO_NUMBER = 9682591
+      # Set to a specific SO number (as string) to track, e.g. "9678417"
 
 # Print debug configuration at startup
 if DEBUG_MODE:
+    print("\n" + "="*60)
+    print("🔍 DEBUG MODE ACTIVATED")
+    print("="*60)
     if DEBUG_COMPONENT_PART is None and DEBUG_SO_NUMBER is None:
-        print("\n=== DEBUG MODE ACTIVE BUT NO FILTERS SET ===")
-        print("Set DEBUG_COMPONENT_PART or DEBUG_SO_NUMBER to see detailed output")
-        print("Example: DEBUG_COMPONENT_PART = '8039831' or DEBUG_SO_NUMBER = '9678487'")
-        print("=" * 50)
+        print("⚠️  NO DEBUG FILTERS SET")
+        print("   Set DEBUG_COMPONENT_PART or DEBUG_SO_NUMBER to see detailed output")
+        print("   Example: DEBUG_COMPONENT_PART = '8039831' or DEBUG_SO_NUMBER = '9678487'")
+        print("   Current settings will show general processing info only")
     else:
-        print("\n=== DEBUG MODE CONFIGURATION ===")
-        print(f"Tracking Component: {DEBUG_COMPONENT_PART if DEBUG_COMPONENT_PART else 'Not specified'}")
-        print(f"Tracking SO Number: {DEBUG_SO_NUMBER if DEBUG_SO_NUMBER else 'Not specified'}")
-        print("=" * 50)
+        print("🎯 DEBUG FILTERS ACTIVE:")
+        print(f"   Component Part: {DEBUG_COMPONENT_PART if DEBUG_COMPONENT_PART else 'Not specified'}")
+        print(f"   SO Number: {DEBUG_SO_NUMBER if DEBUG_SO_NUMBER else 'Not specified'}")
+    print("="*60)
+    print("Debug output will appear in the terminal/console during processing")
+    print("="*60 + "\n")
+    
+    # Show data source information
+    print("📊 DATA SOURCES AND COLUMN MAPPINGS:")
+    print("   📦 IPIS Sheet (Stock):")
+    print("     - Column: 'PART_NO' → Used for stock lookup")
+    print("     - Column: 'Available Qty' → Stock quantity")
+    print("     - Logic: Grouped by PART_NO, sum of Available Qty")
+    print("")
+    print("   🔒 Component Demand Sheet (Committed):")
+    print("     - Column: 'Component Part Number' → Component identifier")
+    print("     - Column: 'Component Qty Required' → Committed quantity")
+    print("     - Logic: Grouped by Component Part Number, sum of Component Qty Required")
+    print("")
+    print("   📋 Planned Demand Sheet (BOM):")
+    print("     - Column: 'SO Number' → Shop Order identifier")
+    print("     - Column: 'Component Part Number' → Component identifier")
+    print("     - Column: 'Component Qty Required' → Required quantity")
+    print("     - Logic: Filtered by SO Number to get BOM components")
+    print("")
+    print("   📄 POs Sheet (Purchase Orders):")
+    print("     - Column: 'Part Number' → Part identifier")
+    print("     - Column: 'Qty Due' → Quantity on order")
+    print("     - Column: 'Promised Due Date' → Expected delivery")
+    print("     - Logic: Filtered by Part Number and future dates")
+    print("")
+    print("   ⏱️ Hours Sheet (Labor Standards):")
+    print("     - Column: 'PART_NO' → Part identifier")
+    print("     - Column: 'Hours per Unit' → Labor hours")
+    print("     - Logic: Grouped by PART_NO, sum of Hours per Unit")
+    print("")
+    print("   📋 Demand Sheet (Main Orders):")
+    print("     - Column: 'SO No' → Shop Order identifier")
+    print("     - Column: 'Part No' → Parent part identifier")
+    print("     - Column: 'Rev Qty Due' → Order quantity")
+    print("     - Column: 'Start Date' → Order start date")
+    print("     - Column: 'Planner' → Planner code")
+    print("="*60 + "\n")
+
+def normalize_so_number(so_val):
+    """Normalize SO numbers to handle Excel float formatting issues"""
+    if pd.isna(so_val):
+        return ""
+    so_str = str(so_val).strip()
+    # Remove trailing .0 if it's a whole number
+    if so_str.endswith('.0') and so_str.replace('.0', '').isdigit():
+        return so_str.replace('.0', '')
+    return so_str
 
 def safe_metric(metrics, key, default=0):
     """Safely get a metric value with a default if missing"""
@@ -74,7 +127,7 @@ def build_stock_dictionary(df_ipis):
     
     return stock
 
-def process_single_scenario(filepath, scenario_name, status_callback=None, scenario_num=1, total_scenarios=1, sorting_strategy=None, include_kits=True, include_instruments=True, include_virtuoso=True):
+def process_single_scenario(filepath, scenario_name, status_callback=None, scenario_num=1, total_scenarios=1, sorting_strategy=None, include_kits=True, include_instruments=True, include_virtuoso=True, include_kit_samples=True):
     """Process a single scenario file and return results with live progress updates"""
     
     if status_callback:
@@ -88,6 +141,68 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     df_ipis = pd.read_excel(filepath, sheet_name="IPIS")
     df_hours = pd.read_excel(filepath, sheet_name="Hours")
     df_pos = pd.read_excel(filepath, sheet_name="POs")
+    
+    # DEBUG: Show data loading results
+    if DEBUG_MODE:
+        print(f"\n🔍 DEBUG: Data loaded from {os.path.basename(filepath)}")
+        print(f"   Demand sheet: {len(df_main)} rows")
+        print(f"   Planned Demand sheet: {len(df_struct)} rows")
+        print(f"   Component Demand sheet: {len(df_component_demand)} rows")
+        print(f"   IPIS sheet: {len(df_ipis)} rows")
+        print(f"   Hours sheet: {len(df_hours)} rows")
+        print(f"   POs sheet: {len(df_pos)} rows")
+        
+        # Show sample data from each sheet to verify data quality
+        if DEBUG_COMPONENT_PART is not None:
+            debug_part = str(DEBUG_COMPONENT_PART)
+            print(f"\n🔍 DEBUG: Data quality check for component {debug_part}")
+            
+            # Check IPIS (stock) data
+            print(f"\n  📦 IPIS (Stock) Data for {debug_part}:")
+            ipis_matches = df_ipis[df_ipis["PART_NO"].astype(str) == debug_part]
+            if not ipis_matches.empty:
+                for _, row in ipis_matches.iterrows():
+                    print(f"    PART_NO: {row['PART_NO']}, Available Qty: {row['Available Qty']}")
+            else:
+                print(f"    ❌ No stock data found for {debug_part}")
+            
+            # Check Component Demand (committed) data
+            print(f"\n  🔒 Component Demand (Committed) Data for {debug_part}:")
+            committed_matches = df_component_demand[df_component_demand["Component Part Number"].astype(str) == debug_part]
+            if not committed_matches.empty:
+                for _, row in committed_matches.iterrows():
+                    print(f"    Component: {row['Component Part Number']}, Qty Required: {row['Component Qty Required']}")
+            else:
+                print(f"    ❌ No committed demand found for {debug_part}")
+            
+            # Check Planned Demand (BOM) data
+            print(f"\n  📋 Planned Demand (BOM) Data for {debug_part}:")
+            planned_matches = df_struct[df_struct["Component Part Number"].astype(str) == debug_part]
+            if not planned_matches.empty:
+                for _, row in planned_matches.iterrows():
+                    print(f"    SO: {row['SO Number']}, Component: {row['Component Part Number']}, Qty: {row['Component Qty Required']}")
+            else:
+                print(f"    ❌ No BOM data found for {debug_part}")
+            
+            # Check POs data
+            print(f"\n  📄 POs Data for {debug_part}:")
+            po_matches = df_pos[df_pos["Part Number"].astype(str) == debug_part]
+            if not po_matches.empty:
+                for _, row in po_matches.iterrows():
+                    print(f"    PO: {row['PO Number']}, Part: {row['Part Number']}, Qty: {row['Qty Due']}, Due: {row['Promised Due Date']}")
+            else:
+                print(f"    ❌ No PO data found for {debug_part}")
+            
+            # Check Hours data
+            print(f"\n  ⏱️ Hours Data for {debug_part}:")
+            hours_matches = df_hours[df_hours["PART_NO"].astype(str) == debug_part]
+            if not hours_matches.empty:
+                for _, row in hours_matches.iterrows():
+                    print(f"    Part: {row['PART_NO']}, Hours per Unit: {row['Hours per Unit']}")
+            else:
+                print(f"    ❌ No hours data found for {debug_part}")
+            
+            print("-" * 80)
     
     # Validate required columns in Demand sheet
     required_columns = ['SO No', 'Part No', 'Planner', 'Start Date', 'Rev Qty Due']
@@ -108,6 +223,35 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     
     # Build stock dictionary
     stock = build_stock_dictionary(df_ipis)
+    
+    # DEBUG: Show stock information
+    if DEBUG_MODE:
+        print(f"\n🔍 DEBUG: Stock information")
+        print(f"   Total stock entries: {len(stock)}")
+        if DEBUG_COMPONENT_PART and str(DEBUG_COMPONENT_PART) in stock:
+            print(f"   🎯 DEBUG PART {DEBUG_COMPONENT_PART}: {stock[str(DEBUG_COMPONENT_PART)]} available")
+        
+        # Show detailed stock building process for debug component
+        if DEBUG_COMPONENT_PART is not None:
+            debug_part = str(DEBUG_COMPONENT_PART)
+            print(f"\n🔍 DEBUG: Stock building process for {debug_part}")
+            
+            # Show raw IPIS data
+            print(f"  📦 Raw IPIS data for {debug_part}:")
+            ipis_raw = df_ipis[df_ipis["PART_NO"].astype(str) == debug_part]
+            if not ipis_raw.empty:
+                total_stock = 0
+                for _, row in ipis_raw.iterrows():
+                    qty = row['Available Qty']
+                    total_stock += qty
+                    print(f"    Row: PART_NO='{row['PART_NO']}', Available Qty={qty}")
+                print(f"    Total stock from IPIS: {total_stock}")
+                print(f"    Final stock in dictionary: {stock.get(debug_part, 0)}")
+            else:
+                print(f"    ❌ No IPIS rows found for {debug_part}")
+                print(f"    Final stock in dictionary: {stock.get(debug_part, 0)}")
+            
+            print("-" * 80)
 
     # Build committed_components
     committed_components = {}
@@ -120,6 +264,36 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
         committed_components = committed_summary.to_dict()
         committed_parts_count = len(committed_components)
         total_committed_qty = sum(committed_components.values())
+        
+        # DEBUG: Show committed components
+        if DEBUG_MODE:
+            print(f"\n🔍 DEBUG: Committed components")
+            print(f"   Total committed parts: {committed_parts_count}")
+            print(f"   Total committed quantity: {total_committed_qty}")
+            if DEBUG_COMPONENT_PART and str(DEBUG_COMPONENT_PART) in committed_components:
+                print(f"   🎯 DEBUG PART {DEBUG_COMPONENT_PART}: {committed_components[str(DEBUG_COMPONENT_PART)]} committed")
+        
+        # Show detailed committed components building process for debug component
+        if DEBUG_COMPONENT_PART is not None:
+            debug_part = str(DEBUG_COMPONENT_PART)
+            print(f"\n🔍 DEBUG: Committed components building process for {debug_part}")
+            
+            # Show raw Component Demand data
+            print(f"  🔒 Raw Component Demand data for {debug_part}:")
+            committed_raw = df_component_demand[df_component_demand["Component Part Number"].astype(str) == debug_part]
+            if not committed_raw.empty:
+                total_committed = 0
+                for _, row in committed_raw.iterrows():
+                    qty = row['Component Qty Required']
+                    total_committed += qty
+                    print(f"    Row: Component='{row['Component Part Number']}', Qty Required={qty}")
+                print(f"    Total committed from Component Demand: {total_committed}")
+                print(f"    Final committed in dictionary: {committed_components.get(debug_part, 0)}")
+            else:
+                print(f"    ❌ No Component Demand rows found for {debug_part}")
+                print(f"    Final committed in dictionary: {committed_components.get(debug_part, 0)}")
+            
+            print("-" * 80)
 
     # Initialize used_components with the committed quantities
     used_components = committed_components.copy()
@@ -134,8 +308,11 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     
     # Build planned demand structure
     planned_demand = df_struct[df_struct["Component Part Number"].notna()].copy()
-    planned_demand["SO Number"] = planned_demand["SO Number"].astype(str)
+    planned_demand["SO Number"] = planned_demand["SO Number"].astype(str).str.strip()
     planned_demand["Component Part Number"] = planned_demand["Component Part Number"].astype(str)
+    
+    # Apply normalization to both planned demand and main data
+    planned_demand["SO Number"] = planned_demand["SO Number"].apply(normalize_so_number)
     
     # Pre-process main data (unchanged)
     df_main['Start Date'] = pd.to_datetime(df_main['Start Date'], errors='coerce')
@@ -150,6 +327,7 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     kits_planners = ['3001', '3801', '5001']  # BVI Kits (3001, 3801) + Malosa Kits (5001)
     instruments_planners = ['3802', '3803', '3804', '3805']  # Manufacturing, Assembly, Packaging, Malosa Instruments
     virtuoso_planners = ['3806']  # Virtuoso
+    kit_samples_planners = ['KIT SAMPLES']
     
     # Build filter mask based on selected categories
     filter_mask = pd.Series([False] * len(df_main), index=df_main.index)
@@ -162,6 +340,9 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     
     if include_virtuoso:
         filter_mask |= df_main['Planner'].isin(virtuoso_planners)
+    
+    if include_kit_samples:
+        filter_mask |= df_main['Planner'].isin(kit_samples_planners)
     
     # Apply filter
     filtered_df_main = df_main[filter_mask].copy()
@@ -203,6 +384,13 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     processing_start_time = time.time()
 
     # Process each order sequentially with FREQUENT UI updates + TIME ESTIMATES
+    
+    # DEBUG: Show header when starting to process orders
+    debug_component_orders_found = 0
+    if DEBUG_MODE and DEBUG_COMPONENT_PART is not None:
+        print(f"\n🎯 DEBUG: Starting to process orders that use component {DEBUG_COMPONENT_PART}")
+        print("="*80)
+    
     for _, row in filtered_df_main.iterrows():
         processed += 1
         
@@ -221,6 +409,8 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
                 remaining_orders = total - processed
                 est_remaining = remaining_orders * baseline_time_per_order
             
+
+            
             if status_callback:
                 strategy_name = sorting_strategy["name"] if sorting_strategy else "Default"
                 if processed == total:
@@ -233,14 +423,56 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
                     else:
                         status_callback(f"🔁 [Scenario {scenario_num}/{total_scenarios}] {strategy_name} - {processed:,}/{total:,} ({progress_pct:.1f}%) | {est_remaining:.0f}s remaining")
         
-        so = str(row["SO Number"]) if pd.notna(row["SO Number"]) else f"ORDER_{processed}"
+        so = str(row["SO Number"]).strip() if pd.notna(row["SO Number"]) else f"ORDER_{processed}"
         part = str(row["Part"]) if pd.notna(row["Part"]) else None
         demand_qty = row["Demand"] if pd.notna(row["Demand"]) and row["Demand"] > 0 else 0
         planner = str(row["Planner"]) if pd.notna(row["Planner"]) else "UNKNOWN"
         start_date = row["Start Date"]
         
+        # NORMALIZE SO NUMBER for consistent matching
+        so = normalize_so_number(so)
+        
+        # DEBUG: Show when processing specific SO or part
+        debug_so_match = DEBUG_SO_NUMBER is not None and str(so) == str(DEBUG_SO_NUMBER)
+        debug_part_match = DEBUG_COMPONENT_PART is not None and str(part) == str(DEBUG_COMPONENT_PART)
+        
+        if DEBUG_MODE and (debug_so_match or debug_part_match):
+            debug_component_orders_found += 1
+            print(f"\n🎯 DEBUG: Processing order {processed}/{total} (Order #{debug_component_orders_found} using {DEBUG_COMPONENT_PART})")
+            print(f"   SO: {so}")
+            print(f"   Part: {part}")
+            print(f"   Demand: {demand_qty}")
+            print(f"   Planner: {planner}")
+            print(f"   Start Date: {start_date}")
+        
+        # ENHANCED DEBUG: Track every Shop Order that tries to allocate to the debug component
+        debug_component_allocation_found = False
+        if DEBUG_MODE and DEBUG_COMPONENT_PART is not None:
+            # Check if this SO will try to allocate the debug component (either as parent part or as component)
+            debug_component = str(DEBUG_COMPONENT_PART)
+            if str(part) == debug_component:
+                debug_component_allocation_found = True
+                print(f"\n🔍 DEBUG COMPONENT ALLOCATION: SO {so} directly uses {debug_component} as parent part")
+            else:
+                # Check if this SO's BOM contains the debug component
+                try:
+                    bom_check = planned_demand[planned_demand["SO Number"] == so]
+                    if not bom_check.empty:
+                        bom_components = bom_check["Component Part Number"].astype(str).tolist()
+                        if debug_component in bom_components:
+                            debug_component_allocation_found = True
+                            comp_row = bom_check[bom_check["Component Part Number"].astype(str) == debug_component].iloc[0]
+                            comp_qty = comp_row["Component Qty Required"]
+                            print(f"\n🔍 DEBUG COMPONENT ALLOCATION: SO {so} (Parent: {part}) requires {comp_qty} units of {debug_component}")
+                except:
+                    pass
+        
         # Skip orders with missing critical data
         if part is None or part == "nan" or demand_qty <= 0:
+            # DEBUG: Show skipped orders
+            if DEBUG_MODE and (debug_so_match or debug_part_match):
+                print(f"   ⚠️  Order skipped: part={part}, demand={demand_qty}")
+            
             results.append({
                 "SO Number": so,
                 "Part": part or "MISSING",
@@ -268,6 +500,73 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
         except:
             bom = pd.DataFrame()
         
+        # DEBUG: Show BOM lookup results for specific SO
+        debug_so_match = DEBUG_SO_NUMBER is not None and str(so) == str(DEBUG_SO_NUMBER)
+        if DEBUG_MODE and debug_so_match:
+            print(f"\n=== DEBUG: BOM Lookup for SO {so} ===")
+            print(f"  Total planned demand records: {len(planned_demand)}")
+            print(f"  Looking for SO Number: '{so}' (type: {type(so)}, repr: {repr(so)})")
+            print(f"  Note: SO Number has been normalized to handle Excel formatting issues")
+            
+            # Show unique SO numbers in planned demand to see the format
+            unique_so_numbers = planned_demand["SO Number"].unique()
+            print(f"  Sample SO numbers in planned demand (normalized): {unique_so_numbers[:10].tolist()}")
+            
+            # Check if our SO exists in any form
+            so_found = planned_demand["SO Number"].astype(str).str.contains(str(so), na=False)
+            print(f"  Records containing '{so}' (anywhere): {so_found.sum()}")
+            
+            # ENHANCED DEBUG: Show the actual records that contain the SO number
+            if so_found.sum() > 0:
+                print(f"\n  🔍 RECORDS CONTAINING '{so}' (showing raw data):")
+                matching_records = planned_demand[so_found]
+                for idx, row in matching_records.iterrows():
+                    raw_so = row["SO Number"]
+                    print(f"    Row {idx}: SO='{raw_so}' (type: {type(raw_so)}, repr: {repr(raw_so)})")
+                    print(f"           Component='{row['Component Part Number']}', Qty={row['Component Qty Required']}")
+            
+            print(f"  Records matching SO {so} exactly: {len(bom)}")
+            if len(bom) > 0:
+                print(f"  Components found:")
+                for _, comp in bom.iterrows():
+                    comp_part = str(comp["Component Part Number"])
+                    comp_qty = comp["Component Qty Required"]
+                    print(f"    {comp_part}: {comp_qty}")
+            else:
+                print(f"  No components found - treating as raw material")
+                # Show a few sample records from planned demand
+                print(f"  Sample planned demand records:")
+                for i, (_, row) in enumerate(planned_demand.head(5).iterrows()):
+                    raw_so = row["SO Number"]
+                    print(f"    Row {i}: SO='{raw_so}' (type: {type(raw_so)}, repr: {repr(raw_so)}), Component='{row['Component Part Number']}', Qty={row['Component Qty Required']}")
+            print("-" * 80)
+        
+        # ENHANCED DEBUG: Show BOM lookup for any SO that uses the debug component
+        if DEBUG_MODE and DEBUG_COMPONENT_PART is not None:
+            debug_part = str(DEBUG_COMPONENT_PART)
+            debug_so_match = DEBUG_SO_NUMBER is not None and str(so) == str(DEBUG_SO_NUMBER)
+            debug_part_match = str(part) == debug_part
+            
+            if debug_so_match or debug_part_match:
+                print(f"\n=== DEBUG: BOM Lookup for SO {so} (Parent: {part}) ===")
+                print(f"  Looking for SO Number: '{so}' in planned demand")
+                print(f"  Records matching SO {so} exactly: {len(bom)}")
+                
+                if len(bom) > 0:
+                    print(f"  Components found in BOM:")
+                    for _, comp in bom.iterrows():
+                        comp_part = str(comp["Component Part Number"])
+                        comp_qty = comp["Component Qty Required"]
+                        is_debug_component = comp_part == debug_part
+                        debug_marker = " 🎯" if is_debug_component else ""
+                        print(f"    {comp_part}: {comp_qty}{debug_marker}")
+                else:
+                    print(f"  No BOM found - treating as raw material")
+                    if debug_part_match:
+                        print(f"  🎯 This SO directly uses {debug_part} as parent part")
+                
+                print("-" * 80)
+        
         # Check material availability
         releasable = True
         shortage_details = []
@@ -281,12 +580,10 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
             # This SO has planned component demand - use ALL-OR-NOTHING allocation
             all_components_available = True
             component_requirements = []
-            
             debug_so_match = DEBUG_SO_NUMBER is not None and str(so) == str(DEBUG_SO_NUMBER)
             if DEBUG_MODE and debug_so_match:
                 print(f"\n=== DEBUG: Processing SO {so} ===")
                 print(f"Found {len(bom)} components in planned demand")
-            
             for _, comp in bom.iterrows():
                 try:
                     comp_part = str(comp["Component Part Number"])
@@ -301,32 +598,34 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
 
                     # Debug output for selected component part and/or SO number
                     debug_part_match = DEBUG_COMPONENT_PART is not None and str(comp_part) == str(DEBUG_COMPONENT_PART)
-                    debug_so_match = DEBUG_SO_NUMBER is not None and str(so) == str(DEBUG_SO_NUMBER)
+                    # Note: debug_so_match is already set above for BOM processing
                     
-                    # Show debug info if we're tracking this component or this SO
+                    # FIX: Always print debug for every component in BOM if SO matches
                     if DEBUG_MODE and (debug_part_match or debug_so_match):
-                        header = ""
-                        if debug_part_match:
-                            header = f"\n=== DEBUG: Component {comp_part} used in SO {so} ==="
-                        elif debug_so_match:
-                            header = f"\n=== DEBUG: SO {so} requires component {comp_part} ==="
-                        print(header)
+                        print(f"\n=== DEBUG: SO {so} (Parent: {part}) requires component {comp_part} ===")
+                        print(f"  📊 STOCK ALLOCATION CALCULATION for component {comp_part}:")
+                        print(f"    Initial stock:           {stock.get(comp_part, 0):>8}")
+                        print(f"    Committed qty:           {committed_components.get(comp_part, 0) if 'committed_components' in locals() else 0:>8}")
+                        print(f"    Already allocated:       {total_used:>8}")
+                        print(f"    Available for this SO:   {true_available:>8}")
+                        print(f"")
+                        print(f"    Required for SO {so}:    {required_qty:>8}")
+                        print(f"    Would remain after:      {available_after_usage:>8}")
+                        print(f"")
+                        print(f"    ✅ CAN FULFILL ORDER:    {will_be_sufficient}")
+                        if will_be_sufficient:
+                            print(f"    📦 ALLOCATION: {required_qty} units allocated to SO {so}")
+                            print(f"    📦 REMAINING: {available_after_usage} units left in stock")
+                        else:
+                            print(f"    ❌ SHORTAGE: Need {required_qty}, have {true_available}, short {abs(available_after_usage)}")
                         
-                        # Component stock info
-                        print(f"  Stock Information:")
-                        print(f"    Initial stock:      {stock.get(comp_part, 0)}")
-                        print(f"    Committed qty:      {committed_components.get(comp_part, 0) if 'committed_components' in locals() else 'N/A'}")
-                        print(f"    Already used:       {total_used}")
-                        print(f"    Available before:   {true_available}")
-                        
-                        # Order requirements
-                        print(f"  Order Requirements:")
-                        print(f"    Required qty:       {required_qty}")
-                        print(f"    Available after:    {available_after_usage}")
-                        print(f"    Will be sufficient: {will_be_sufficient}")
-                        
-                        if not will_be_sufficient:
-                            print(f"\n  *** SHORTAGE DETECTED: Need {required_qty}, have {true_available}, short {abs(available_after_usage)} ***")
+                        # Show detailed calculation breakdown
+                        print(f"\n  🔍 DETAILED CALCULATION BREAKDOWN:")
+                        print(f"    Stock lookup: stock.get('{comp_part}', 0) = {stock.get(comp_part, 0)}")
+                        print(f"    Used lookup: used_components.get('{comp_part}', 0) = {total_used}")
+                        print(f"    Calculation: {stock.get(comp_part, 0)} - {total_used} = {true_available}")
+                        print(f"    Required: {required_qty}")
+                        print(f"    Sufficient: {true_available} >= {required_qty} = {will_be_sufficient}")
                         
                         # Show all POs for this part
                         future_pos = df_pos[
@@ -334,15 +633,14 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
                             (pd.to_datetime(df_pos['Promised Due Date'], errors='coerce') >= datetime.now())
                         ]
                         if not future_pos.empty:
-                            print("\n  Future POs:")
+                            print(f"\n  📋 Future POs for {comp_part}:")
                             for _, po_row in future_pos.iterrows():
                                 po_id = po_row['PO Number']
                                 po_qty = po_row['Qty Due']
                                 po_date = pd.to_datetime(po_row['Promised Due Date']).strftime('%Y-%m-%d')
                                 print(f"    PO {po_id}: {po_qty} due {po_date}")
                         else:
-                            print("\n  No future POs found for this part")
-                        
+                            print(f"\n  📋 No future POs found for {comp_part}")
                         print("-" * 80)
 
                     component_requirements.append({
@@ -388,12 +686,61 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
             else:
                 releasable = False
 
-        else:
+        elif len(bom) == 0:
             # This SO has no planned component demand - treat as raw material/purchased part
             try:
                 total_used = used_components.get(part, 0)
                 true_available = stock.get(part, 0) - total_used  # Changed to use true_available
                 available_after_usage = true_available - demand_qty  # Added to match debug logic
+                
+                # DEBUG: Show allocation calculation for raw material parts (only for raw material orders)
+                debug_part_match = DEBUG_COMPONENT_PART is not None and str(part) == str(DEBUG_COMPONENT_PART)
+                debug_so_match = DEBUG_SO_NUMBER is not None and str(so) == str(DEBUG_SO_NUMBER)
+                
+                if DEBUG_MODE and (debug_part_match or debug_so_match):
+                    print(f"\n=== DEBUG: Raw Material {part} for SO {so} ===")
+                    print(f"  📊 STOCK ALLOCATION CALCULATION:")
+                    print(f"    Initial stock:           {stock.get(part, 0):>8}")
+                    print(f"    Committed qty:           {committed_components.get(part, 0) if 'committed_components' in locals() else 0:>8}")
+                    print(f"    Already allocated:       {total_used:>8}")
+                    print(f"    Available for this SO:   {true_available:>8}")
+                    print(f"")
+                    print(f"    Required for SO {so}:    {demand_qty:>8}")
+                    print(f"    Would remain after:      {available_after_usage:>8}")
+                    print(f"")
+                    print(f"    ✅ CAN FULFILL ORDER:    {true_available >= demand_qty}")
+                    
+                    if true_available >= demand_qty:
+                        print(f"    📦 ALLOCATION: {demand_qty} units allocated to SO {so}")
+                        print(f"    📦 REMAINING: {available_after_usage} units left in stock")
+                    else:
+                        print(f"    ❌ SHORTAGE: Need {demand_qty}, have {true_available}, short {abs(available_after_usage)}")
+                    
+                    # Show detailed calculation breakdown for raw material
+                    print(f"\n  🔍 DETAILED CALCULATION BREAKDOWN:")
+                    print(f"    Stock lookup: stock.get('{part}', 0) = {stock.get(part, 0)}")
+                    print(f"    Used lookup: used_components.get('{part}', 0) = {total_used}")
+                    print(f"    Calculation: {stock.get(part, 0)} - {total_used} = {true_available}")
+                    print(f"    Required: {demand_qty}")
+                    print(f"    Sufficient: {true_available} >= {demand_qty} = {true_available >= demand_qty}")
+                    
+                    # Show all POs for this part
+                    future_pos = df_pos[
+                        (df_pos['Part Number'].astype(str) == str(part)) &
+                        (pd.to_datetime(df_pos['Promised Due Date'], errors='coerce') >= datetime.now())
+                    ]
+                    if not future_pos.empty:
+                        print(f"\n  📋 Future POs for {part}:")
+                        for _, po_row in future_pos.iterrows():
+                            po_id = po_row['PO Number']
+                            po_qty = po_row['Qty Due']
+                            po_date = pd.to_datetime(po_row['Promised Due Date']).strftime('%Y-%m-%d')
+                            print(f"    PO {po_id}: {po_qty} due {po_date}")
+                    else:
+                        print(f"\n  📋 No future POs found for {part}")
+                    
+                    print("-" * 80)
+                
                 if true_available >= demand_qty:  # Changed to use true_available
                     used_components[part] = used_components.get(part, 0) + demand_qty
                     releasable = True
@@ -425,6 +772,15 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
                 shortage_parts_only.append(part_short)
 
         clean_shortages = "; ".join(shortage_parts_only) if shortage_parts_only else "-"
+
+        # DEBUG: Show final order decision
+        if DEBUG_MODE and (debug_so_match or debug_part_match):
+            print(f"\n  🎯 FINAL ORDER DECISION:")
+            print(f"    SO {so} ({part}): {'✅ RELEASABLE' if releasable else '❌ ON HOLD'}")
+            if not releasable and shortage_details:
+                print(f"    Reason: {shortage_details[0] if shortage_details else 'Unknown'}")
+            print(f"    Components needed: {components_needed if components_needed else 'None (raw material)'}")
+            print("=" * 80)
 
         results.append({
             "SO Number": so,
@@ -545,6 +901,17 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     releasable_virtuoso_hours = releasable_virtuoso['Hours'].sum()
     releasable_virtuoso_qty = releasable_virtuoso['Demand'].sum()
     
+    # Kit Samples (Planner code KIT SAMPLES)
+    kit_samples_planners = ['KIT SAMPLES']
+    total_kit_samples = df_results[df_results['Planner'].isin(kit_samples_planners)]
+    releasable_kit_samples = releasable_results[releasable_results['Planner'].isin(kit_samples_planners)]
+    total_kit_samples_count = len(total_kit_samples)
+    total_kit_samples_hours = total_kit_samples['Hours'].sum()
+    total_kit_samples_qty = total_kit_samples['Demand'].sum()
+    releasable_kit_samples_count = len(releasable_kit_samples)
+    releasable_kit_samples_hours = releasable_kit_samples['Hours'].sum()
+    releasable_kit_samples_qty = releasable_kit_samples['Demand'].sum()
+    
     # Total Instruments
     total_instruments_count = (total_manufacturing_count + total_assembly_count + 
                              total_packaging_count + total_malosa_instruments_count)
@@ -558,6 +925,64 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
                                   releasable_packaging_hours + releasable_malosa_instruments_hours)
     releasable_instruments_qty = (releasable_manufacturing_qty + releasable_assembly_qty + 
                                 releasable_packaging_qty + releasable_malosa_instruments_qty)
+    
+    # DEBUG: Show final results summary
+    if DEBUG_MODE:
+        print(f"\n🔍 DEBUG: Processing complete for {scenario_name}")
+        print(f"   Total orders processed: {total_orders}")
+        print(f"   Releasable orders: {releasable_count}")
+        print(f"   Held orders: {held_count}")
+        print(f"   Release rate: {releasable_count/total_orders*100:.1f}%" if total_orders > 0 else "   Release rate: 0%")
+        print(f"   Total hours: {total_hours:.1f}")
+        print(f"   Releasable hours: {releasable_hours:.1f}")
+        print(f"   Hours release rate: {releasable_hours/total_hours*100:.1f}%" if total_hours > 0 else "   Hours release rate: 0%")
+        
+        # Show debug component summary if tracking specific part
+        if DEBUG_COMPONENT_PART is not None:
+            debug_part = str(DEBUG_COMPONENT_PART)
+            initial_stock = stock.get(debug_part, 0)
+            final_used = used_components.get(debug_part, 0)
+            remaining_stock = initial_stock - final_used
+            
+            print(f"\n  🎯 DEBUG COMPONENT SUMMARY ({debug_part}):")
+            print(f"    Orders using this component: {debug_component_orders_found}")
+            print(f"    Initial stock:     {initial_stock}")
+            print(f"    Total allocated:   {final_used}")
+            print(f"    Remaining stock:   {remaining_stock}")
+            print(f"    Allocation rate:   {final_used/initial_stock*100:.1f}%" if initial_stock > 0 else "    Allocation rate:   0%")
+            
+            # Show all Shop Orders that tried to allocate this component
+            print(f"\n  📋 ALL SHOP ORDERS THAT TRIED TO ALLOCATE {debug_part}:")
+            component_allocation_count = 0
+            for result in results:
+                result_so = result["SO Number"]
+                result_part = result["Part"]
+                result_status = result["Status"]
+                
+                # Check if this SO directly uses the component as parent part
+                if str(result_part) == debug_part:
+                    component_allocation_count += 1
+                    print(f"    {component_allocation_count:2d}. SO {result_so}: Direct use as parent part - {result_status}")
+                else:
+                    # Check if this SO's BOM contains the component
+                    try:
+                        bom_check = planned_demand[planned_demand["SO Number"] == result_so]
+                        if not bom_check.empty:
+                            bom_components = bom_check["Component Part Number"].astype(str).tolist()
+                            if debug_part in bom_components:
+                                component_allocation_count += 1
+                                comp_row = bom_check[bom_check["Component Part Number"].astype(str) == debug_part].iloc[0]
+                                comp_qty = comp_row["Component Qty Required"]
+                                print(f"    {component_allocation_count:2d}. SO {result_so} (Parent: {result_part}): Requires {comp_qty} units - {result_status}")
+                    except:
+                        pass
+            
+            if component_allocation_count == 0:
+                print(f"    No Shop Orders found that use component {debug_part}")
+            else:
+                print(f"\n    Total Shop Orders trying to allocate {debug_part}: {component_allocation_count}")
+        
+        print("="*60)
     
     return {
         'name': scenario_name,
@@ -636,7 +1061,13 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
             'releasable_virtuoso_qty': releasable_virtuoso_qty,
             '---5': '---',
             'committed_parts_count': committed_parts_count,
-            'total_committed_qty': total_committed_qty
+            'total_committed_qty': total_committed_qty,
+            'total_kit_samples_count': total_kit_samples_count,
+            'total_kit_samples_hours': total_kit_samples_hours,
+            'total_kit_samples_qty': total_kit_samples_qty,
+            'releasable_kit_samples_count': releasable_kit_samples_count,
+            'releasable_kit_samples_hours': releasable_kit_samples_hours,
+            'releasable_kit_samples_qty': releasable_kit_samples_qty
         }
     }
 
@@ -697,7 +1128,8 @@ def load_and_process_files():
                         scenario_num, total_scenarios, strategy,
                         include_kits=include_kits_var.get(),
                         include_instruments=include_instruments_var.get(),
-                        include_virtuoso=include_virtuoso_var.get()
+                        include_virtuoso=include_virtuoso_var.get(),
+                        include_kit_samples=include_kit_samples_var.get()
                     )
                     scenario_end_time = time.time()
                     scenario_duration = scenario_end_time - scenario_start_time
@@ -787,7 +1219,8 @@ def load_and_process_files():
                     filepath, scenario_name, update_progress, scenario_num, len(filepaths),
                     include_kits=include_kits_var.get(),
                     include_instruments=include_instruments_var.get(),
-                    include_virtuoso=include_virtuoso_var.get()
+                    include_virtuoso=include_virtuoso_var.get(),
+                    include_kit_samples=include_kit_samples_var.get()
                 )
                 scenario_end_time = time.time()
                 scenario_duration = scenario_end_time - scenario_start_time
@@ -829,7 +1262,8 @@ def load_and_process_files():
                     'releasable_assembly_count', 'releasable_assembly_hours', 'releasable_assembly_qty',
                     'releasable_packaging_count', 'releasable_packaging_hours', 'releasable_packaging_qty',
                     'releasable_malosa_instruments_count', 'releasable_malosa_instruments_hours', 'releasable_malosa_instruments_qty',
-                    'releasable_virtuoso_count', 'releasable_virtuoso_hours', 'releasable_virtuoso_qty'
+                    'releasable_virtuoso_count', 'releasable_virtuoso_hours', 'releasable_virtuoso_qty',
+                    'total_qty', 'total_hours' # These are per-scenario totals, summing them gives overall totals
                 ]}
 
             agg = {}
@@ -914,6 +1348,7 @@ def load_and_process_files():
                 ('Kits Included', "Yes" if include_kits_var.get() else "No"),
                 ('Instruments Included', "Yes" if include_instruments_var.get() else "No"),
                 ('Virtuoso Included', "Yes" if include_virtuoso_var.get() else "No"),
+                ('Kit Samples Included', "Yes" if include_kit_samples_var.get() else "No"),
                 ('--- Overall Performance ---', '---'),
                 ('Total Orders Processed', f"{total_orders_processed:,}"),
                 ('Total Demand Quantity', f"{source_metrics.get('total_qty', 0):,}"),
@@ -1038,7 +1473,10 @@ def load_and_process_files():
                         'Total Inst Qty': f"{metrics['releasable_instruments_qty']:,}",
                         '---4': '---',
                         'Committed Parts': metrics['committed_parts_count'],
-                        'Committed Qty': f"{metrics['total_committed_qty']:,}"
+                        'Committed Qty': f"{metrics['total_committed_qty']:,}",
+                        'Kit Samples': metrics['releasable_kit_samples_count'],
+                        'Kit Samples Hours': f"{metrics['releasable_kit_samples_hours']:,.1f}",
+                        'Kit Samples Qty': f"{metrics['releasable_kit_samples_qty']:,}"
                     })
                 comparison_df = pd.DataFrame(comparison_data)
 
@@ -1132,7 +1570,8 @@ def load_and_process_files():
                         'Assembly (3803)', 'Assembly Hours', 'Assembly Qty', 'Packaging (3804)', 'Packaging Hours',
                         'Packaging Qty', 'Malosa Inst (3805)', 'Malosa Inst Hours', 'Malosa Inst Qty',
                         'Virtuoso (3806)', 'Virtuoso Hours', 'Virtuoso Qty', 'Total Instruments',
-                        'Total Inst Hours', 'Total Inst Qty', 'Committed Parts', 'Committed Qty'
+                        'Total Inst Hours', 'Total Inst Qty', 'Committed Parts', 'Committed Qty',
+                        'Kit Samples', 'Kit Samples Hours', 'Kit Samples Qty'
                     ]
                     
                     for col in numeric_columns:
@@ -1207,6 +1646,7 @@ def load_and_process_files():
    Kits (3001, 3801, 5001): {'✓ Included' if include_kits_var.get() else '✗ Excluded'}
    Instruments (3802, 3803, 3804, 3805): {'✓ Included' if include_instruments_var.get() else '✗ Excluded'}
    Virtuoso (3806): {'✓ Included' if include_virtuoso_var.get() else '✗ Excluded'}
+   Kit Samples (KIT SAMPLES): {'✓ Included' if include_kit_samples_var.get() else '✗ Excluded'}
 
 """
             
@@ -1285,6 +1725,7 @@ def load_and_process_files():
    Kits (3001, 3801, 5001): {'✓ Included' if include_kits_var.get() else '✗ Excluded'}
    Instruments (3802, 3803, 3804, 3805): {'✓ Included' if include_instruments_var.get() else '✗ Excluded'}
    Virtuoso (3806): {'✓ Included' if include_virtuoso_var.get() else '✗ Excluded'}
+   Kit Samples (KIT SAMPLES): {'✓ Included' if include_kit_samples_var.get() else '✗ Excluded'}
 
 🏆 BEST PERFORMER: {os.path.basename(best_scenario['filepath'])}
    ✅ {best_scenario['metrics']['releasable_count']:,} releasable orders ({best_scenario['metrics']['releasable_count']/best_scenario['metrics']['total_orders']*100:.1f}%)
@@ -1327,6 +1768,7 @@ def load_and_process_files():
    Kits (3001, 3801, 5001): {'✓ Included' if include_kits_var.get() else '✗ Excluded'}
    Instruments (3802, 3803, 3804, 3805): {'✓ Included' if include_instruments_var.get() else '✗ Excluded'}
    Virtuoso (3806): {'✓ Included' if include_virtuoso_var.get() else '✗ Excluded'}
+   Kit Samples (KIT SAMPLES): {'✓ Included' if include_kit_samples_var.get() else '✗ Excluded'}
 
 🔧 RELEASABLE KITS:
    BVI Kits (3001, 3801):    {format_metric(safe_metric(metrics, 'releasable_bvi_kits_count')):>6} orders,  {format_metric(safe_metric(metrics, 'releasable_bvi_kits_hours'), 'hours'):>8} hrs,  {format_metric(safe_metric(metrics, 'releasable_bvi_kits_qty')):>8} qty
@@ -1461,6 +1903,7 @@ material_frame.grid(row=5, column=0, pady=(0, 10), sticky="ew")
 include_kits_var = tk.BooleanVar(value=True)
 include_instruments_var = tk.BooleanVar(value=True)
 include_virtuoso_var = tk.BooleanVar(value=True)
+include_kit_samples_var = tk.BooleanVar(value=True)
 
 # Kits checkbox
 kits_checkbox = ttk.Checkbutton(
@@ -1489,6 +1932,15 @@ virtuoso_checkbox = ttk.Checkbutton(
 )
 virtuoso_checkbox.grid(row=2, column=0, sticky=tk.W, pady=(0, 5))
 
+# Kit Samples checkbox
+kit_samples_checkbox = ttk.Checkbutton(
+    material_frame,
+    text="🧪 Kit Samples (Planner code: KIT SAMPLES)",
+    variable=include_kit_samples_var,
+    style='Big.TCheckbutton'
+)
+kit_samples_checkbox.grid(row=3, column=0, sticky=tk.W, pady=(0, 5))
+
 # Material categories tooltip
 material_tooltip = ttk.Label(
     material_frame,
@@ -1496,7 +1948,7 @@ material_tooltip = ttk.Label(
     font=('Arial', 8, 'italic'),
     foreground='gray'
 )
-material_tooltip.grid(row=3, column=0, pady=(5, 0), sticky=tk.W)
+material_tooltip.grid(row=4, column=0, pady=(5, 0), sticky=tk.W)
 
 # Process button
 process_btn = ttk.Button(main_frame, text="📂 SELECT FILES & PROCESS", 
