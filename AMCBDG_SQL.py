@@ -7,14 +7,28 @@ from datetime import datetime
 import openpyxl
 from openpyxl.styles import PatternFill, Font
 from openpyxl.utils import get_column_letter
+import pymssql
+from dotenv import load_dotenv
+import sys
+from sqlalchemy import create_engine, text
+
+# Load environment variables
+load_dotenv('db_credentials.env')
 
 # VERSION INFO
-VERSION = "v1.9.0"
-VERSION_DATE = "2025-07-30"
+VERSION = "v2.0.0"
+VERSION_DATE = "2025-07-08"
 DEBUG_MODE = False
 DEBUG_COMPONENT_PART = None  # Set to a specific part number (as string) to track, e.g. "8034855"
 DEBUG_SO_NUMBER = 9682591
       # Set to a specific SO number (as string) to track, e.g. "9678417"
+
+# Database configuration
+DB_HOST = os.getenv('DB_HOST', 'localhost')
+DB_USER = os.getenv('DB_USER', 'myuser')
+DB_PASSWORD = os.getenv('DB_PASSWORD', 'mypassword')
+DB_NAME = os.getenv('DB_NAME', 'mydatabase')
+DB_PORT = os.getenv('DB_PORT', '1433')
 
 # Print debug configuration at startup
 if DEBUG_MODE:
@@ -36,40 +50,257 @@ if DEBUG_MODE:
     
     # Show data source information
     print("📊 DATA SOURCES AND COLUMN MAPPINGS:")
-    print("   📦 IPIS Sheet (Stock):")
+    print("   📦 IPIS Table (Stock):")
     print("     - Column: 'PART_NO' → Used for stock lookup")
     print("     - Column: 'Available Qty' → Stock quantity")
     print("     - Logic: Grouped by PART_NO, sum of Available Qty")
     print("")
-    print("   🔒 Component Demand Sheet (Committed):")
+    print("   🔒 Component Demand Table (Committed):")
     print("     - Column: 'Component Part Number' → Component identifier")
     print("     - Column: 'Component Qty Required' → Committed quantity")
     print("     - Logic: Grouped by Component Part Number, sum of Component Qty Required")
     print("")
-    print("   📋 Planned Demand Sheet (BOM):")
+    print("   📋 Planned Demand Table (BOM):")
     print("     - Column: 'SO Number' → Shop Order identifier")
     print("     - Column: 'Component Part Number' → Component identifier")
     print("     - Column: 'Component Qty Required' → Required quantity")
     print("     - Logic: Filtered by SO Number to get BOM components")
     print("")
-    print("   📄 POs Sheet (Purchase Orders):")
+    print("   📄 POs Table (Purchase Orders):")
     print("     - Column: 'Part Number' → Part identifier")
     print("     - Column: 'Qty Due' → Quantity on order")
     print("     - Column: 'Promised Due Date' → Expected delivery")
     print("     - Logic: Filtered by Part Number and future dates")
     print("")
-    print("   ⏱️ Hours Sheet (Labor Standards):")
+    print("   ⏱️ Hours Table (Labor Standards):")
     print("     - Column: 'PART_NO' → Part identifier")
     print("     - Column: 'Hours per Unit' → Labor hours")
     print("     - Logic: Grouped by PART_NO, sum of Hours per Unit")
     print("")
-    print("   📋 Demand Sheet (Main Orders):")
+    print("   📋 Demand Table (Main Orders):")
     print("     - Column: 'SO No' → Shop Order identifier")
     print("     - Column: 'Part No' → Parent part identifier")
     print("     - Column: 'Rev Qty Due' → Order quantity")
     print("     - Column: 'Start Date' → Order start date")
     print("     - Column: 'Planner' → Planner code")
     print("="*60 + "\n")
+
+def get_database_connection():
+    """Create and return a SQLAlchemy engine for SQL Server"""
+    try:
+        # Create connection string for SQL Server
+        connection_string = f"mssql+pyodbc://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?driver=ODBC+Driver+17+for+SQL+Server"
+        
+        # Create SQLAlchemy engine with SSMS-like parameters
+        engine = create_engine(
+            connection_string,
+            connect_args={
+                'appname': 'Microsoft SQL Server Management Studio - Query',
+                'charset': 'utf8',
+                'login_timeout': 30,
+                'timeout': 30
+            },
+            echo=False  # Set to True for SQL query logging
+        )
+        return engine
+    except Exception as e:
+        raise Exception(f"SQL Server connection failed: {str(e)}")
+
+def execute_query(query, params=None):
+    """Execute a SQL query and return results as a pandas DataFrame"""
+    engine = None
+    try:
+        engine = get_database_connection()
+        # Use SQLAlchemy text() for parameterized queries
+        if params:
+            df = pd.read_sql_query(text(query), engine, params=params)
+        else:
+            df = pd.read_sql_query(text(query), engine)
+        return df
+    except Exception as e:
+        raise Exception(f"Query execution failed: {str(e)}")
+    finally:
+        if engine:
+            engine.dispose()
+
+def load_demand_data():
+    """Load demand data from database"""
+    query = """
+    SELECT
+		so.ORDER_NO AS 'SO No',
+		so.PART_NO AS 'Part No',
+		ipt.PLANNER_BUYER AS 'Planner',
+		ipt.PRIME_COMMODITY AS 'Comm Group',
+		so.ROWSTATE AS 'Status',
+		so.REVISED_START_DATE AS 'Start Date',
+		so.REVISED_QTY_DUE AS 'Rev Qty Due',
+		CASE WHEN RIGHT(so.PART_NO,1) = 'S' THEN 'Sterile' ELSE 'Non-Sterile' END AS 'Sterility'
+    FROM IFS.SHOP_ORD_TAB AS so
+	INNER JOIN IFS.INVENTORY_PART_TAB AS ipt
+		ON so.CONTRACT = ipt.CONTRACT AND so.PART_NO = ipt.PART_NO
+	WHERE so.CONTRACT = '2051'
+		AND so.ROWSTATE IN ('Planned')
+		AND ipt.PLANNER_BUYER IN ('3001','3801','5001','KIT SAMPLES','3802','3803','3804','3805')
+	ORDER BY so.REVISED_START_DATE, so.ORDER_NO
+	;
+    """
+    return execute_query(query)
+
+def load_planned_demand_data():
+    """Load planned demand (BOM) data from database"""
+    query = """
+    SELECT
+		mac.ORDER_NO AS 'SO Number',
+		so.PART_NO AS 'Kit Number',
+		mac.PART_NO AS 'Component Part Number',
+		mac.LINE_ITEM_NO AS 'Line Number',
+		mac.DATE_REQUIRED AS 'Date Needed',
+		mac.QTY_REQUIRED AS 'Component Qty Required'
+	FROM IFS.SHOP_MATERIAL_ALLOC_TAB AS mac
+	LEFT JOIN IFS.SHOP_ORD_TAB AS so
+		ON mac.ORDER_NO = so.ORDER_NO AND mac.CONTRACT = so.CONTRACT
+	WHERE
+		so.CONTRACT = '2051'
+		AND mac.ROWSTATE IN ('Planned')
+	ORDER BY so.REVISED_START_DATE, mac.ORDER_NO
+    """
+    return execute_query(query)
+
+def load_component_demand_data():
+    """Load committed component demand data from database"""
+    query = """
+    SELECT
+		mac.ORDER_NO AS 'SO Number',
+		so.PART_NO AS 'Kit Number',
+		mac.PART_NO AS 'Component Part Number',
+		mac.LINE_ITEM_NO AS 'Line Number',
+		mac.DATE_REQUIRED AS 'Date Needed',
+		mac.QTY_REQUIRED AS 'Component Qty Required'
+	FROM IFS.SHOP_MATERIAL_ALLOC_TAB AS mac
+	LEFT JOIN IFS.SHOP_ORD_TAB AS so
+		ON mac.ORDER_NO = so.ORDER_NO AND mac.CONTRACT = so.CONTRACT
+	WHERE
+		so.CONTRACT = '2051'
+		AND mac.ROWSTATE IN ('Released','Reserved')
+	ORDER BY so.REVISED_START_DATE, mac.ORDER_NO
+	"""
+    return execute_query(query)
+
+def load_ipis_data():
+    """Load stock data from IPIS table"""
+    query = """
+    SELECT
+		ipt.PART_NO,
+		ipt.LOCATION_NO,
+		ipt.LOT_BATCH_NO,
+		ipt.QTY_ONHAND - ipt.QTY_RESERVED AS 'Available Qty'
+	FROM IFS.INVENTORY_PART_IN_STOCK_TAB AS ipt
+	WHERE 
+		ipt.CONTRACT = '2051'
+		AND ipt.WAREHOUSE <> 'QUALITY'
+		AND ipt.AVAILABILITY_CONTROL_ID IS NULL
+	UNION
+	SELECT
+		ipt.PART_NO,
+		ipt.LOCATION_NO,
+		ipt.LOT_BATCH_NO,
+		ipt.QTY_ONHAND - ipt.QTY_RESERVED AS 'Available Qty'
+	FROM IFS.INVENTORY_PART_IN_STOCK_TAB AS ipt
+	WHERE 
+		ipt.CONTRACT = '2051'
+		AND ipt.WAREHOUSE <> 'QUALITY'
+		AND ipt.AVAILABILITY_CONTROL_ID IN ('GOODS-INWARDS')
+	"""
+    return execute_query(query)
+
+def load_hours_data():
+    """Load labor standards data from database"""
+    query = """
+    SELECT
+		hrs.PART_NO,
+		hrs.LABOR_CLASS_NO,
+		CASE
+			WHEN hrs.RUN_TIME_CODE IN (1,3) THEN hrs.LABOR_RUN_FACTOR
+			WHEN hrs.RUN_TIME_CODE IN (2) THEN ISNULL(1/NULLIF(hrs.LABOR_RUN_FACTOR,0),0)
+			ELSE 'Error' END AS 'Hours per Unit',
+		'Kits' AS 'Area'
+	FROM IFS.ROUTING_OPERATION_TAB AS hrs
+	WHERE CONTRACT = '2051'
+		AND PHASE_OUT_DATE IS NULL
+		AND LABOR_CLASS_NO IN ('4936', '4948')
+	UNION
+	SELECT
+		hrs.PART_NO,
+		hrs.LABOR_CLASS_NO,
+		CASE
+			WHEN hrs.RUN_TIME_CODE IN (1,3) THEN hrs.LABOR_RUN_FACTOR
+			WHEN hrs.RUN_TIME_CODE IN (2) THEN ISNULL(1/NULLIF(hrs.LABOR_RUN_FACTOR,0),0)
+			ELSE 'Error' END AS 'Hours per Unit',
+		CASE
+			WHEN hrs.LABOR_CLASS_NO IN ('4931') THEN 'Manufacturing'
+			WHEN hrs.LABOR_CLASS_NO IN ('4940') THEN 'Assembly'
+			WHEN hrs.LABOR_CLASS_NO IN ('4941', '4947') THEN 'Packaging'
+			WHEN hrs.LABOR_CLASS_NO IN ('4942') THEN 'Boxing'
+			ELSE 'N/A' END AS 'Area'
+	FROM IFS.ROUTING_OPERATION_TAB AS hrs
+	WHERE CONTRACT = '2051'
+	AND PHASE_OUT_DATE IS NULL
+	AND LABOR_CLASS_NO IN ('4931', '4940', '4941', '4942', '4947');
+    """
+    return execute_query(query)
+
+def load_pos_data():
+    """Load purchase orders data from database"""
+    query = """
+    DECLARE @POWeeksOut INT;
+	SET @POWeeksOut = 7;
+	SELECT
+		pol.ORDER_NO AS 'PO Number',
+		pol.PART_NO AS 'Part Number',
+		pol.BUY_QTY_DUE * pol.CONV_FACTOR AS 'Qty Due',
+		pol.INVOICING_SUPPLIER AS 'Supplier',
+		pol.LINE_NO AS 'PO Line',
+		pol.PROMISED_DELIVERY_DATE AS 'Promised Due Date'
+	FROM IFS.PURCHASE_ORDER_LINE_TAB AS pol
+	INNER JOIN IFS.PURCHASE_ORDER_TAB AS po
+		ON pol.ORDER_NO = po.ORDER_NO
+	WHERE pol.PURCHASE_SITE = '2051'
+		AND pol.ROWSTATE = 'Confirmed'
+		AND pol.PROMISED_DELIVERY_DATE <= DATEADD(DAY, (@POWeeksOut+1)*7 - DATEPART(WEEKDAY, GETDATE()), GETDATE())
+		AND pol.INVOICING_SUPPLIER NOT IN ('1060')
+		ORDER BY pol.PROMISED_DELIVERY_DATE
+    """
+    return execute_query(query)
+
+def test_database_connection():
+    """Test the database connection and return status"""
+    try:
+        engine = get_database_connection()
+        if engine:
+            # Test the connection by executing a simple query
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            engine.dispose()
+            return True, "Database connection successful"
+    except Exception as e:
+        return False, f"Database connection failed: {str(e)}"
+    return False, "Database connection failed: Unknown error"
+
+def get_table_info():
+    """Get information about available tables in SQL Server"""
+    try:
+        engine = get_database_connection()
+        with engine.connect() as connection:
+            result = connection.execute(text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_type = 'BASE TABLE'
+            """))
+            tables = [row[0] for row in result.fetchall()]
+        engine.dispose()
+        return tables
+    except Exception as e:
+        return []
 
 def normalize_so_number(so_val):
     """Normalize SO numbers to handle Excel float formatting issues"""
@@ -127,32 +358,35 @@ def build_stock_dictionary(df_ipis):
     
     return stock
 
-def process_single_scenario(filepath, scenario_name, status_callback=None, scenario_num=1, total_scenarios=1, sorting_strategy=None, include_kits=True, include_instruments=True, include_virtuoso=True, include_kit_samples=True):
-    """Process a single scenario file and return results with live progress updates"""
+def process_single_scenario(scenario_name, status_callback=None, scenario_num=1, total_scenarios=1, sorting_strategy=None, include_kits=True, include_instruments=True, include_virtuoso=True, include_kit_samples=True):
+    """Process a single scenario from database and return results with live progress updates"""
     
     if status_callback:
         strategy_name = sorting_strategy["name"] if sorting_strategy else "Default"
-        status_callback(f"📂 [Scenario {scenario_num}/{total_scenarios}] Loading sheets for {os.path.basename(filepath)} ({strategy_name})...")
+        status_callback(f"📂 [Scenario {scenario_num}/{total_scenarios}] Loading data from database ({strategy_name})...")
     
-    # Load the sheets we need
-    df_main = pd.read_excel(filepath, sheet_name="Demand")
-    df_struct = pd.read_excel(filepath, sheet_name="Planned Demand")
-    df_component_demand = pd.read_excel(filepath, sheet_name="Component Demand")
-    df_ipis = pd.read_excel(filepath, sheet_name="IPIS")
-    df_hours = pd.read_excel(filepath, sheet_name="Hours")
-    df_pos = pd.read_excel(filepath, sheet_name="POs")
+    # Load the data from database
+    try:
+        df_main = load_demand_data()
+        df_struct = load_planned_demand_data()
+        df_component_demand = load_component_demand_data()
+        df_ipis = load_ipis_data()
+        df_hours = load_hours_data()
+        df_pos = load_pos_data()
+    except Exception as e:
+        raise Exception(f"Failed to load data from database: {str(e)}")
     
     # DEBUG: Show data loading results
     if DEBUG_MODE:
-        print(f"\n🔍 DEBUG: Data loaded from {os.path.basename(filepath)}")
-        print(f"   Demand sheet: {len(df_main)} rows")
-        print(f"   Planned Demand sheet: {len(df_struct)} rows")
-        print(f"   Component Demand sheet: {len(df_component_demand)} rows")
-        print(f"   IPIS sheet: {len(df_ipis)} rows")
-        print(f"   Hours sheet: {len(df_hours)} rows")
-        print(f"   POs sheet: {len(df_pos)} rows")
+        print(f"\n🔍 DEBUG: Data loaded from database")
+        print(f"   Demand table: {len(df_main)} rows")
+        print(f"   Planned Demand table: {len(df_struct)} rows")
+        print(f"   Component Demand table: {len(df_component_demand)} rows")
+        print(f"   IPIS table: {len(df_ipis)} rows")
+        print(f"   Hours table: {len(df_hours)} rows")
+        print(f"   POs table: {len(df_pos)} rows")
         
-        # Show sample data from each sheet to verify data quality
+        # Show sample data from each table to verify data quality
         if DEBUG_COMPONENT_PART is not None:
             debug_part = str(DEBUG_COMPONENT_PART)
             print(f"\n🔍 DEBUG: Data quality check for component {debug_part}")
@@ -204,11 +438,11 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
             
             print("-" * 80)
     
-    # Validate required columns in Demand sheet
+    # Validate required columns in Demand table
     required_columns = ['SO No', 'Part No', 'Planner', 'Start Date', 'Rev Qty Due']
     missing_columns = [col for col in required_columns if col not in df_main.columns]
     if missing_columns:
-        raise ValueError(f"Missing required columns in Demand sheet: {', '.join(missing_columns)}")
+        raise ValueError(f"Missing required columns in Demand table: {', '.join(missing_columns)}")
     
     # Rename columns to match the rest of the code's expectations
     df_main = df_main.rename(columns={
@@ -414,7 +648,7 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
             if status_callback:
                 strategy_name = sorting_strategy["name"] if sorting_strategy else "Default"
                 if processed == total:
-                    status_callback(f"✅ [Scenario {scenario_num}/{total_scenarios}] {os.path.basename(filepath)} ({strategy_name}) - Completed {total:,} orders in {elapsed:.1f}s")
+                    status_callback(f"✅ [Scenario {scenario_num}/{total_scenarios}] Database ({strategy_name}) - Completed {total:,} orders in {elapsed:.1f}s")
                 else:
                     # Show current scenario progress + context about remaining scenarios
                     remaining_scenarios = total_scenarios - scenario_num
@@ -986,7 +1220,7 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     
     return {
         'name': scenario_name,
-        'filepath': filepath,
+        'filepath': 'Database',
         'sorting_strategy': sorting_strategy["name"] if sorting_strategy else "Default (Start Date)",
         'results_df': df_results,
         'metrics': {
@@ -1071,20 +1305,19 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
         }
     }
 
-def load_and_process_files():
-    # Multiple file selection
-    filepaths = filedialog.askopenfilenames(
-        title="Select Material Demand Files (Hold Ctrl for multiple files)",
-        filetypes=[("Excel files", "*.xlsm *.xlsx")]
-    )
-    if not filepaths:
-        # Reset to ready state if cancelled
-        status_var.set("🔄 Ready - Select Excel file(s) to begin processing")
+def load_and_process_database():
+    """Load and process data from database instead of Excel files"""
+    
+    # Test database connection first
+    connection_success, connection_message = test_database_connection()
+    if not connection_success:
+        messagebox.showerror("Database Connection Error", connection_message)
+        status_var.set("❌ Database connection failed")
         return
 
     try:
         # Clear the UI and start fresh
-        status_var.set("🔄 Initializing...")
+        status_var.set("🔄 Initializing database connection...")
         root.update_idletasks()
         
         start_time = time.time()
@@ -1104,119 +1337,23 @@ def load_and_process_files():
         if minmax_mode:
             # Min/Max optimization mode - test all sorting strategies
             strategies = get_sorting_strategies()
-            total_scenarios = len(filepaths) * len(strategies)
+            total_scenarios = len(strategies)
             
-            update_progress(f"🔥 MIN/MAX MODE: Testing {len(strategies)} sorting strategies on {len(filepaths)} file(s) = {total_scenarios} total scenarios")
+            update_progress(f"🔥 MIN/MAX MODE: Testing {len(strategies)} sorting strategies on database = {total_scenarios} total scenarios")
             time.sleep(1)
             
             scenario_num = 0
             all_strategy_results = []  # Store ALL results for comparison
             
-            for file_idx, filepath in enumerate(filepaths):
-                filename = os.path.basename(filepath)
-                base_filename = filename.replace('.xlsm', '').replace('.xlsx', '')
-                file_strategy_results = []  # Results for this specific file
+            for strategy_idx, strategy in enumerate(strategies):
+                scenario_num += 1
+                scenario_name = f"Database_{strategy['name'].replace(' ', '_').replace('(', '').replace(')', '')}"
                 
-                for strategy_idx, strategy in enumerate(strategies):
-                    scenario_num += 1
-                    scenario_name = f"{base_filename}_{strategy['name'].replace(' ', '_').replace('(', '').replace(')', '')}"
-                    
-                    # Process with specific sorting strategy
-                    scenario_start_time = time.time()
-                    scenario_result = process_single_scenario(
-                        filepath, scenario_name, update_progress, 
-                        scenario_num, total_scenarios, strategy,
-                        include_kits=include_kits_var.get(),
-                        include_instruments=include_instruments_var.get(),
-                        include_virtuoso=include_virtuoso_var.get(),
-                        include_kit_samples=include_kit_samples_var.get()
-                    )
-                    scenario_end_time = time.time()
-                    scenario_duration = scenario_end_time - scenario_start_time
-                    
-                    # Store result for this file
-                    file_strategy_results.append(scenario_result)
-                    all_strategy_results.append(scenario_result)
-                    
-                    # Show completion
-                    metrics = scenario_result['metrics']
-                    remaining_scenarios = total_scenarios - scenario_num
-                    
-                    if remaining_scenarios > 0:
-                        total_elapsed = time.time() - start_time
-                        avg_time_per_scenario = total_elapsed / scenario_num
-                        estimated_remaining = remaining_scenarios * avg_time_per_scenario
-                        
-                        update_progress(f"✅ [{scenario_num}/{total_scenarios}] {strategy['name']}: {metrics['releasable_count']:,}/{metrics['total_orders']:,} orders ({scenario_duration:.1f}s) | {estimated_remaining:.0f}s remaining")
-                    else:
-                        update_progress(f"✅ [{scenario_num}/{total_scenarios}] {strategy['name']}: {metrics['releasable_count']:,}/{metrics['total_orders']:,} orders ({scenario_duration:.1f}s) | OPTIMIZATION COMPLETE!")
-                    
-                    time.sleep(0.2)  # Brief pause between strategies
-                
-                # After testing all strategies for this file, find the best ones
-                best_orders_strategy = max(file_strategy_results, key=lambda s: s['metrics']['releasable_count'])
-                best_hours_strategy = max(file_strategy_results, key=lambda s: s['metrics']['releasable_hours'])
-                best_qty_strategy = max(file_strategy_results, key=lambda s: s['metrics']['releasable_qty'])
-                
-                # Create NEW scenario objects with clear names for the best strategies
-                # Best Orders Strategy
-                best_orders_scenario = {
-                    'name': f"BEST_ORDERS_{base_filename}",
-                    'filepath': filepath,
-                    'sorting_strategy': f"🏆 BEST ORDERS: {best_orders_strategy['sorting_strategy']}",
-                    'results_df': best_orders_strategy['results_df'],
-                    'metrics': best_orders_strategy['metrics']
-                }
-                scenarios.append(best_orders_scenario)
-                
-                # Best Hours Strategy
-                best_hours_scenario = {
-                    'name': f"BEST_HOURS_{base_filename}",
-                    'filepath': filepath,
-                    'sorting_strategy': f"🏆 BEST HOURS: {best_hours_strategy['sorting_strategy']}",
-                    'results_df': best_hours_strategy['results_df'],
-                    'metrics': best_hours_strategy['metrics']
-                }
-                scenarios.append(best_hours_scenario)
-                
-                # Best Quantity Strategy
-                best_qty_scenario = {
-                    'name': f"BEST_QTY_{base_filename}",
-                    'filepath': filepath,
-                    'sorting_strategy': f"🏆 BEST QTY: {best_qty_strategy['sorting_strategy']}",
-                    'results_df': best_qty_strategy['results_df'],
-                    'metrics': best_qty_strategy['metrics']
-                }
-                scenarios.append(best_qty_scenario)
-                
-                update_progress(f"🏆 File {file_idx+1}/{len(filepaths)} optimized: Orders={best_orders_strategy['sorting_strategy']} ({best_orders_strategy['metrics']['releasable_count']:,}), Hours={best_hours_strategy['sorting_strategy']} ({best_hours_strategy['metrics']['releasable_hours']:,.0f}), Qty={best_qty_strategy['sorting_strategy']} ({best_qty_strategy['metrics']['releasable_qty']:,})")
-                time.sleep(0.5)
-            
-            # Use all_strategy_results for comparison tables
-            scenarios_for_comparison = all_strategy_results
-        else:
-            # Standard mode - process files normally
-            total_scenarios = len(filepaths)
-            
-            for i, filepath in enumerate(filepaths):
-                filename = os.path.basename(filepath)
-                scenario_name = f"Scenario_{i+1}_{filename.replace('.xlsm', '').replace('.xlsx', '')}"
-                scenario_num = i + 1
-                
-                # Calculate estimate for this scenario
-                if i > 0:
-                    total_elapsed = time.time() - start_time
-                    avg_time_per_scenario = total_elapsed / i
-                    remaining_scenarios = len(filepaths) - i
-                    total_est_remaining = remaining_scenarios * avg_time_per_scenario
-                    update_progress(f"📊 [Scenario {scenario_num}/{len(filepaths)}] Starting: {filename} | Est. {total_est_remaining:.0f}s for all remaining scenarios")
-                else:
-                    update_progress(f"📊 [Scenario {scenario_num}/{len(filepaths)}] Starting: {filename}")
-                
-                # Process with live progress updates
+                # Process with specific sorting strategy
                 scenario_start_time = time.time()
                 scenario_result = process_single_scenario(
-                    filepath, scenario_name, update_progress, scenario_num, len(filepaths),
+                    scenario_name, update_progress, 
+                    scenario_num, total_scenarios, strategy,
                     include_kits=include_kits_var.get(),
                     include_instruments=include_instruments_var.get(),
                     include_virtuoso=include_virtuoso_var.get(),
@@ -1225,23 +1362,94 @@ def load_and_process_files():
                 scenario_end_time = time.time()
                 scenario_duration = scenario_end_time - scenario_start_time
                 
-                scenarios.append(scenario_result)
-                scenarios_for_comparison.append(scenario_result)  # Same as scenarios in standard mode
+                # Store result for this strategy
+                all_strategy_results.append(scenario_result)
                 
-                # Show completion with actual metrics and time
+                # Show completion
                 metrics = scenario_result['metrics']
+                remaining_scenarios = total_scenarios - scenario_num
                 
-                if i < len(filepaths) - 1:
+                if remaining_scenarios > 0:
                     total_elapsed = time.time() - start_time
-                    avg_time_per_scenario = total_elapsed / (i + 1)
-                    remaining_scenarios = len(filepaths) - (i + 1)
+                    avg_time_per_scenario = total_elapsed / scenario_num
                     estimated_remaining = remaining_scenarios * avg_time_per_scenario
                     
-                    update_progress(f"✅ [Scenario {scenario_num}/{len(filepaths)}] Complete: {metrics['releasable_count']:,}/{metrics['total_orders']:,} releasable ({scenario_duration:.1f}s) | Est. {estimated_remaining:.0f}s for {remaining_scenarios} remaining scenarios")
+                    update_progress(f"✅ [{scenario_num}/{total_scenarios}] {strategy['name']}: {metrics['releasable_count']:,}/{metrics['total_orders']:,} orders ({scenario_duration:.1f}s) | {estimated_remaining:.0f}s remaining")
                 else:
-                    update_progress(f"✅ [Scenario {scenario_num}/{len(filepaths)}] Complete: {metrics['releasable_count']:,}/{metrics['total_orders']:,} releasable ({scenario_duration:.1f}s) | COMPLETE!")
+                    update_progress(f"✅ [{scenario_num}/{total_scenarios}] {strategy['name']}: {metrics['releasable_count']:,}/{metrics['total_orders']:,} orders ({scenario_duration:.1f}s) | OPTIMIZATION COMPLETE!")
                 
-                time.sleep(0.3)
+                time.sleep(0.2)  # Brief pause between strategies
+            
+            # Find the best strategies
+            best_orders_strategy = max(all_strategy_results, key=lambda s: s['metrics']['releasable_count'])
+            best_hours_strategy = max(all_strategy_results, key=lambda s: s['metrics']['releasable_hours'])
+            best_qty_strategy = max(all_strategy_results, key=lambda s: s['metrics']['releasable_qty'])
+            
+            # Create NEW scenario objects with clear names for the best strategies
+            # Best Orders Strategy
+            best_orders_scenario = {
+                'name': f"BEST_ORDERS_Database",
+                'filepath': 'Database',
+                'sorting_strategy': f"🏆 BEST ORDERS: {best_orders_strategy['sorting_strategy']}",
+                'results_df': best_orders_strategy['results_df'],
+                'metrics': best_orders_strategy['metrics']
+            }
+            scenarios.append(best_orders_scenario)
+            
+            # Best Hours Strategy
+            best_hours_scenario = {
+                'name': f"BEST_HOURS_Database",
+                'filepath': 'Database',
+                'sorting_strategy': f"🏆 BEST HOURS: {best_hours_strategy['sorting_strategy']}",
+                'results_df': best_hours_strategy['results_df'],
+                'metrics': best_hours_strategy['metrics']
+            }
+            scenarios.append(best_hours_scenario)
+            
+            # Best Quantity Strategy
+            best_qty_scenario = {
+                'name': f"BEST_QTY_Database",
+                'filepath': 'Database',
+                'sorting_strategy': f"🏆 BEST QTY: {best_qty_strategy['sorting_strategy']}",
+                'results_df': best_qty_strategy['results_df'],
+                'metrics': best_qty_strategy['metrics']
+            }
+            scenarios.append(best_qty_scenario)
+            
+            update_progress(f"🏆 Database optimized: Orders={best_orders_strategy['sorting_strategy']} ({best_orders_strategy['metrics']['releasable_count']:,}), Hours={best_hours_strategy['sorting_strategy']} ({best_hours_strategy['metrics']['releasable_hours']:,.0f}), Qty={best_qty_strategy['sorting_strategy']} ({best_qty_strategy['metrics']['releasable_qty']:,})")
+            time.sleep(0.5)
+            
+            # Use all_strategy_results for comparison tables
+            scenarios_for_comparison = all_strategy_results
+        else:
+            # Standard mode - process database once
+            total_scenarios = 1
+            
+            scenario_name = "Database_Scenario"
+            scenario_num = 1
+            
+            update_progress(f"📊 [Scenario {scenario_num}/{total_scenarios}] Starting: Database Analysis")
+            
+            # Process with live progress updates
+            scenario_start_time = time.time()
+            scenario_result = process_single_scenario(
+                scenario_name, update_progress, scenario_num, total_scenarios,
+                include_kits=include_kits_var.get(),
+                include_instruments=include_instruments_var.get(),
+                include_virtuoso=include_virtuoso_var.get(),
+                include_kit_samples=include_kit_samples_var.get()
+            )
+            scenario_end_time = time.time()
+            scenario_duration = scenario_end_time - scenario_start_time
+            
+            scenarios.append(scenario_result)
+            scenarios_for_comparison.append(scenario_result)  # Same as scenarios in standard mode
+            
+            # Show completion with actual metrics and time
+            metrics = scenario_result['metrics']
+            update_progress(f"✅ [Scenario {scenario_num}/{total_scenarios}] Complete: {metrics['releasable_count']:,}/{metrics['total_orders']:,} releasable ({scenario_duration:.1f}s) | COMPLETE!")
+            
+            time.sleep(0.3)
         
         # Calculate total processing time
         end_time = time.time()
@@ -1289,14 +1497,14 @@ def load_and_process_files():
         source_metrics = {}
         total_orders_processed = 0
 
-        if not scenarios: # Handle case where no scenarios were processed (e.g., file dialog cancelled after initial selection)
+        if not scenarios: # Handle case where no scenarios were processed (e.g., database connection failed)
             # Use default empty metrics for the summary if no scenarios exist
             source_metrics = aggregate_metrics([], is_min_max_mode_for_totals=minmax_mode)
             # total_orders_processed is already 0
-            # Ensure filepaths is not empty if we try to use it later for "Files Processed"
+            # Ensure we have a default for "Files Processed"
             files_processed_list_for_summary = []
         else:
-            files_processed_list_for_summary = filepaths # Use the original filepaths list for the summary
+            files_processed_list_for_summary = ['Database'] # Use database as the source
 
             if minmax_mode:
                 # In min/max mode, total_orders_processed sums total_orders from one "best" strategy per unique file
@@ -1323,7 +1531,7 @@ def load_and_process_files():
         # Save results
         if not no_export_var.get():
             # Save results
-            output_dir = os.path.dirname(filepaths[0])
+            output_dir = os.getcwd()  # Use current directory for database results
             timestamp = datetime.now().strftime('%Y%m%d_%H%M')
             
             if minmax_mode:
@@ -1845,13 +2053,13 @@ version_label = ttk.Label(main_frame, text=f"Updated: {VERSION_DATE}",
 version_label.grid(row=1, column=0, pady=(0, 15))
 
 # Instructions
-instructions = """• Select MULTIPLE files to compare different scenarios (hold Ctrl)
-• Enable Min/Max Optimization to find the best sorting strategy for each file
-• Use Quick Analysis Mode for faster results without Excel export
-• Select specific material categories to process (Kits, Instruments, Virtuoso)"""
+#instructions = """• Database connection configured via db_credentials.env
+#• Enable Min/Max Optimization to find the best sorting strategy for database data
+#• Use Quick Analysis Mode for faster results without Excel export
+#• Select specific material categories to process (Kits, Instruments, Virtuoso)"""
 
-inst_label = ttk.Label(main_frame, text=instructions, justify=tk.LEFT, wraplength=700)
-inst_label.grid(row=2, column=0, pady=(0, 20))
+#inst_label = ttk.Label(main_frame, text=instructions, justify=tk.LEFT, wraplength=700)
+#inst_label.grid(row=2, column=0, pady=(0, 20))
 
 # Min/Max Mode checkbox with tooltip
 minmax_frame = ttk.Frame(main_frame)
@@ -1951,8 +2159,8 @@ material_tooltip = ttk.Label(
 material_tooltip.grid(row=4, column=0, pady=(5, 0), sticky=tk.W)
 
 # Process button
-process_btn = ttk.Button(main_frame, text="📂 SELECT FILES & PROCESS", 
-                        command=load_and_process_files, 
+process_btn = ttk.Button(main_frame, text="🗄️ CONNECT TO DATABASE & PROCESS", 
+                        command=load_and_process_database, 
                         style='Big.TButton')
 process_btn.grid(row=6, column=0, pady=(10, 20))
 
@@ -1964,7 +2172,7 @@ style.configure('Success.TFrame', background='#7ff09a')
 
 # Status
 status_var = tk.StringVar()
-status_var.set("🔄 Ready - Select Excel file(s) to begin processing")
+status_var.set("🔄 Ready - Connect to database to begin processing")
 status_label = ttk.Label(main_frame, textvariable=status_var, font=('Arial', 10))
 status_label.grid(row=7, column=0, pady=(0, 10), sticky=tk.W)
 
@@ -1992,7 +2200,7 @@ results_frame.columnconfigure(0, weight=1)
 results_frame.rowconfigure(0, weight=1)
 
 # Show initial message
-results_text.insert(1.0, "Select your Excel file(s) to begin material release planning...")
+results_text.insert(1.0, "Connect to your database to begin material release planning...")
 
 if __name__ == "__main__":
     root.mainloop()

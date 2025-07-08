@@ -1,203 +1,146 @@
-# Plannr
+# PlanSnap v2.0.0 - Material Release Planning Tool (SQL Server Version)
 
 ## Overview
-Plannr is a suite of production planning and scheduling tools designed to optimize manufacturing operations. It includes multiple modules for materials checking, scheduling, and production optimization.
+PlanSnap is a material release planning tool that analyzes shop orders and determines which orders can be released based on material availability. This version integrates directly with SQL Server databases instead of Excel files.
 
 ## Features
-- Material Requirements Planning
-- Production Scheduling
-- Capacity Planning
-- Multi-Department Coordination
-- Constraint-Based Optimization
-- Excel Integration
+- **SQL Server Integration**: Direct connection to SQL Server databases
+- **Triple Optimization Mode**: Tests all sorting strategies to find optimal results for Orders, Hours, and Quantity
+- **Material Category Filtering**: Process specific categories (Kits, Instruments, Virtuoso, Kit Samples)
+- **Real-time Processing**: Live progress updates during analysis
+- **Excel Export**: Generate detailed reports with multiple sheets
 
-## Modules
+## Database Setup
 
-### AMCBD (Automated Materials Checker) (Beta)
-An automated materials checker with min/max optimization capabilities:
-- Material availability analysis
-- Stock level optimization
-- Multiple metric focus areas
-- Comparative scenario analysis
-- Customizable sorting strategies
-- Stock dictionary building
+### 1. Configure Database Credentials
+Edit `db_credentials.env` with your SQL Server connection details:
 
-#### Required Input Files:
-1. **Demand Sheet:**
-   - Part: Part number (string)
-   - SO Number: Shop order number
-   - Start Date: Order start date
-   - Demand: Required quantity
-   - Planner: Planner name/ID
+```env
+DB_HOST=your_server_name
+DB_USER=your_username
+DB_PASSWORD=your_password
+DB_NAME=your_database
+DB_PORT=1433
+```
 
-2. **Planned Demand Sheet:**
-   - SO Number: Shop order reference
-   - Component Part Number: Required parts
-   - Component quantities
+### 2. Required Database Tables
+The application expects the following tables in your database:
 
-3. **Component Demand Sheet:**
-   - Component Part Number
-   - Component Qty Required
+#### Demand Table (`demand_table`)
+```sql
+CREATE TABLE demand_table (
+    `SO No` VARCHAR(50),
+    `Part No` VARCHAR(50),
+    `Rev Qty Due` DECIMAL(10,2),
+    `Start Date` DATE,
+    `Planner` VARCHAR(20)
+);
+```
 
-4. **IPIS Sheet:**
-   - PART_NO: Part number
-   - Available Qty: Current stock level
+#### Planned Demand Table (`planned_demand_table`)
+```sql
+CREATE TABLE planned_demand_table (
+    `SO Number` VARCHAR(50),
+    `Component Part Number` VARCHAR(50),
+    `Component Qty Required` DECIMAL(10,2)
+);
+```
 
-5. **Hours Sheet:**
-   - PART_NO: Part number
-   - Hours per Unit: Labor standard
+#### Component Demand Table (`component_demand_table`)
+```sql
+CREATE TABLE component_demand_table (
+    `Component Part Number` VARCHAR(50),
+    `Component Qty Required` DECIMAL(10,2)
+);
+```
 
-6. **POs Sheet:**
-   - Purchase order information
-   - Expected deliveries
+#### IPIS Table (`ipis_table`)
+```sql
+CREATE TABLE ipis_table (
+    `PART_NO` VARCHAR(50),
+    `Available Qty` DECIMAL(10,2)
+);
+```
 
-#### Sorting Strategies:
-- Start Date (Early/Late First)
-- Demand (Small/Large First)
-- Hours (Quick/Long First)
-- Part Number (A-Z/Z-A)
-- Planner (A-Z/Z-A)
+#### Hours Table (`hours_table`)
+```sql
+CREATE TABLE hours_table (
+    `PART_NO` VARCHAR(50),
+    `Hours per Unit` DECIMAL(10,4)
+);
+```
 
-### AMCSummareyes (Stable)
-A companion tool to AMCBD that provides:
-- Detailed summary reports
-- Data visualization
-- Metric aggregation
-- Performance analytics
-- Export capabilities
-
-### InstSch (Instruments Scheduler)
-A specialized scheduler for instrument production (Beta):
-- Department-specific scheduling
-- Instrument-specific constraints
-- Multi-department coordination
-- Format batching support
-
-### SchEng (Scheduling Engine)
-A flexible constraint-based scheduling engine that optimizes production schedules based on:
-- Resource capacity
-- Labor hours
-- Material availability
-- Due dates
-- Department constraints
-
-#### Key Features:
-- Multi-department scheduling
-- Flexible constraint system
-- Priority-based scheduling
-- Real-time optimization
-- Excel import/export
-- Interactive GUI
-
-#### Required Input Files:
-1. **ReleasedPOOL Sheet:**
-   - Order information (Order No, Part No, Quantity, Dates)
-   - Production requirements
-
-2. **Main Sheet** (sheet name "Main"):
-   - Additional order details
-   - Resource requirements (Picks, Hours, Boxes)
-   - Geographic and brand information
+#### POs Table (`pos_table`)
+```sql
+CREATE TABLE pos_table (
+    `PO Number` VARCHAR(50),
+    `Part Number` VARCHAR(50),
+    `Qty Due` DECIMAL(10,2),
+    `Promised Due Date` DATE
+);
+```
 
 ## Installation
 
-### Prerequisites
-1. Python 3.7 or higher
-2. Required Python packages:
-   ```
-   pandas>=1.3.0
-   numpy>=1.20.0
-   openpyxl>=3.0.0
-   ```
+1. Install required dependencies:
+```bash
+pip install -r requirements.txt
+```
 
-### Setup Steps
-1. Download the Plannr suite to your local machine
-2. Install required dependencies:
-   ```bash
-   pip install pandas numpy openpyxl
-   ```
-3. Ensure Excel is installed for file operations
+2. Configure your database credentials in `db_credentials.env`
+
+3. Ensure your database tables are set up with the correct structure
 
 ## Usage
 
-### Running AMCBD
-1. Prepare your Excel file with required sheets:
-   - Demand: Order details and demands
-   - Planned Demand: Component requirements
-   - Component Demand: Current commitments
-   - IPIS: Stock levels
-   - Hours: Labor standards
-   - POs: Purchase order data
+1. Run the application:
+```bash
+python AMCBDG_SQL.py
+```
 
-2. Launch the application:
-   ```bash
-   python AMCBD.py
-   ```
+2. Configure processing options:
+   - **Triple Optimization Mode**: Enable to test all sorting strategies
+   - **Quick Analysis Mode**: Disable Excel export for faster results
+   - **Material Categories**: Select which categories to process
 
-3. Use the interface to:
-   - Select input file(s)
-   - Choose sorting strategy
-   - Run analysis
-   - View results
-   - Export reports
+3. Click "🗄️ CONNECT TO DATABASE & PROCESS" to begin analysis
 
-4. Analysis Features:
-   - Stock availability check
-   - Component commitment tracking
-   - Labor hours calculation
-   - Multiple scenario comparison
-   - Progress tracking with time estimates
+## Output
 
-### Running the Scheduling Engine (SchEng)
-1. Prepare your input Excel file with required sheets:
-   - ReleasedPOOL
-   - Main
-   - Hours (optional)
-2. Launch the application:
-   ```bash
-   python SchEng.py
-   ```
-3. Use the GUI to:
-   - Load your planning data
-   - Set constraints
-   - Generate schedules
-   - Export results
+The tool generates:
+- **Summary Sheet**: Overall metrics and performance statistics
+- **Strategy Comparison**: Results from all tested sorting strategies (if optimization mode enabled)
+- **Individual Scenario Sheets**: Detailed results for each scenario
 
-### Data File Requirements
-- **Format**: Excel (.xlsx or .xlsm)
-- **Required Sheets**:
-  - ReleasedPOOL: Order details
-  - Main: Additional information
-  - IPIS: Stock levels (for AMCBD)
-- **Optional Sheets**:
-  - Hours: Labor standards
-  - Constraints: Capacity limits
+## Material Categories
 
-## Configuration
-- Adjust department capacities
-- Set scheduling constraints
-- Modify priority calculations
-- Configure output formats
-- Customize sorting strategies (AMCBD)
-- Set metric thresholds
+- **Kits** (Planner codes: 3001, 3801, 5001)
+- **Instruments** (Planner codes: 3802, 3803, 3804, 3805)
+- **Virtuoso** (Planner code: 3806)
+- **Kit Samples** (Planner code: KIT SAMPLES)
+
+## Database Support
+
+- **SQL Server**: Full support with pymssql
 
 ## Troubleshooting
-Common issues and solutions:
-1. **Excel File Access**: 
-   - Ensure file is not open in Excel
-   - Check file permissions
-2. **Missing Data**: 
-   - Verify all required sheets exist
-   - Check column names match expected format
-3. **Format Issues**: 
-   - Check date formats (YYYY-MM-DD)
-   - Verify numeric data types
-4. **Performance**: 
-   - Close other applications for large datasets
-   - Consider splitting large files
-5. **GUI Issues**:
-   - Verify tkinter installation
-   - Check screen resolution settings
 
-## Support
-Contact the Production Control Department for support and feature requests.
+### Connection Issues
+- Verify database credentials in `db_credentials.env`
+- Ensure database server is running
+- Check firewall settings for remote connections
+
+### Missing Tables
+- Create required tables with correct column names
+- Ensure data types match expected format
+- Verify table permissions for your database user
+
+### Performance Issues
+- Use Quick Analysis Mode for faster results
+- Consider indexing frequently queried columns
+- Optimize database queries for large datasets
+
+## Version History
+
+- **v2.0.0**: SQL Server database integration
+- **v1.9.0**: Excel-based processing with optimization features
