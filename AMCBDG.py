@@ -7,6 +7,98 @@ from datetime import datetime
 import openpyxl
 from openpyxl.styles import PatternFill, Font
 from openpyxl.utils import get_column_letter
+import psutil
+
+class PerformanceTracker:
+    """Track performance metrics across different phases"""
+    
+    def __init__(self):
+        self.phases = {}
+        self.current_phase = None
+        self.phase_start_time = None
+        self.memory_usage = []
+        self.process = psutil.Process()
+    
+    def start_phase(self, phase_name):
+        """Start timing a new phase"""
+        if self.current_phase:
+            self.end_phase()
+        
+        self.current_phase = phase_name
+        self.phase_start_time = time.time()
+        memory_info = self.process.memory_info()
+        self.memory_usage.append({
+            'phase': phase_name,
+            'memory_mb': memory_info.rss / 1024 / 1024,
+            'timestamp': time.time()
+        })
+    
+    def end_phase(self):
+        """End the current phase and record timing"""
+        if self.current_phase and self.phase_start_time:
+            duration = time.time() - self.phase_start_time
+            if self.current_phase not in self.phases:
+                self.phases[self.current_phase] = []
+            self.phases[self.current_phase].append(duration)
+            
+            # Record final memory usage for this phase
+            memory_info = self.process.memory_info()
+            self.memory_usage.append({
+                'phase': f"{self.current_phase}_end",
+                'memory_mb': memory_info.rss / 1024 / 1024,
+                'timestamp': time.time()
+            })
+            
+            self.current_phase = None
+            self.phase_start_time = None
+    
+    def get_phase_summary(self):
+        """Get summary of all phases"""
+        summary = {}
+        for phase, times in self.phases.items():
+            if times:
+                summary[phase] = {
+                    'total_time': sum(times),
+                    'avg_time': sum(times) / len(times),
+                    'count': len(times),
+                    'min_time': min(times),
+                    'max_time': max(times)
+                }
+        return summary
+    
+    def get_memory_summary(self):
+        """Get memory usage summary"""
+        if not self.memory_usage:
+            return {}
+        
+        memory_values = [m['memory_mb'] for m in self.memory_usage]
+        return {
+            'peak_memory_mb': max(memory_values),
+            'avg_memory_mb': sum(memory_values) / len(memory_values),
+            'initial_memory_mb': self.memory_usage[0]['memory_mb'] if self.memory_usage else 0,
+            'final_memory_mb': self.memory_usage[-1]['memory_mb'] if self.memory_usage else 0
+        }
+    
+    def cleanup(self):
+        """Clean up and end any current phase"""
+        if self.current_phase:
+            self.end_phase()
+
+# Global performance tracker
+performance_tracker = PerformanceTracker()
+
+def timing_decorator(phase_name):
+    """Decorator to automatically time function execution"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            performance_tracker.start_phase(phase_name)
+            try:
+                result = func(*args, **kwargs)
+                return result
+            finally:
+                performance_tracker.end_phase()
+        return wrapper
+    return decorator
 
 # VERSION INFO
 VERSION = "v1.9.0"
@@ -113,6 +205,7 @@ def get_sorting_strategies():
         {"name": "Planner (Z-A)", "columns": ["Planner", "Start Date"], "ascending": [False, True]}
     ]
 
+@timing_decorator("Build Stock Dictionary")
 def build_stock_dictionary(df_ipis):
     """Build stock dict using IPIS as primary source"""
     stock = {}
@@ -134,13 +227,25 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
         strategy_name = sorting_strategy["name"] if sorting_strategy else "Default"
         status_callback(f"📂 [Scenario {scenario_num}/{total_scenarios}] Loading sheets for {os.path.basename(filepath)} ({strategy_name})...")
     
-    # Load the sheets we need
-    df_main = pd.read_excel(filepath, sheet_name="Demand")
-    df_struct = pd.read_excel(filepath, sheet_name="Planned Demand")
-    df_component_demand = pd.read_excel(filepath, sheet_name="Component Demand")
-    df_ipis = pd.read_excel(filepath, sheet_name="IPIS")
-    df_hours = pd.read_excel(filepath, sheet_name="Hours")
-    df_pos = pd.read_excel(filepath, sheet_name="POs")
+    # Load the sheets we need with timing
+    @timing_decorator("Load Excel Data")
+    def load_excel_data(filepath):
+        return {
+            'df_main': pd.read_excel(filepath, sheet_name="Demand"),
+            'df_struct': pd.read_excel(filepath, sheet_name="Planned Demand"),
+            'df_component_demand': pd.read_excel(filepath, sheet_name="Component Demand"),
+            'df_ipis': pd.read_excel(filepath, sheet_name="IPIS"),
+            'df_hours': pd.read_excel(filepath, sheet_name="Hours"),
+            'df_pos': pd.read_excel(filepath, sheet_name="POs")
+        }
+    
+    excel_data = load_excel_data(filepath)
+    df_main = excel_data['df_main']
+    df_struct = excel_data['df_struct']
+    df_component_demand = excel_data['df_component_demand']
+    df_ipis = excel_data['df_ipis']
+    df_hours = excel_data['df_hours']
+    df_pos = excel_data['df_pos']
     
     # DEBUG: Show data loading results
     if DEBUG_MODE:
@@ -253,7 +358,8 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
             
             print("-" * 80)
 
-    # Build committed_components
+    # Build committed_components with timing
+    performance_tracker.start_phase("Build Committed Components")
     committed_components = {}
     committed_parts_count = 0
     total_committed_qty = 0
@@ -264,36 +370,35 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
         committed_components = committed_summary.to_dict()
         committed_parts_count = len(committed_components)
         total_committed_qty = sum(committed_components.values())
-        
-        # DEBUG: Show committed components
-        if DEBUG_MODE:
-            print(f"\n🔍 DEBUG: Committed components")
-            print(f"   Total committed parts: {committed_parts_count}")
-            print(f"   Total committed quantity: {total_committed_qty}")
-            if DEBUG_COMPONENT_PART and str(DEBUG_COMPONENT_PART) in committed_components:
-                print(f"   🎯 DEBUG PART {DEBUG_COMPONENT_PART}: {committed_components[str(DEBUG_COMPONENT_PART)]} committed")
-        
-        # Show detailed committed components building process for debug component
-        if DEBUG_COMPONENT_PART is not None:
-            debug_part = str(DEBUG_COMPONENT_PART)
-            print(f"\n🔍 DEBUG: Committed components building process for {debug_part}")
-            
-            # Show raw Component Demand data
-            print(f"  🔒 Raw Component Demand data for {debug_part}:")
-            committed_raw = df_component_demand[df_component_demand["Component Part Number"].astype(str) == debug_part]
-            if not committed_raw.empty:
-                total_committed = 0
-                for _, row in committed_raw.iterrows():
-                    qty = row['Component Qty Required']
-                    total_committed += qty
-                    print(f"    Row: Component='{row['Component Part Number']}', Qty Required={qty}")
-                print(f"    Total committed from Component Demand: {total_committed}")
-                print(f"    Final committed in dictionary: {committed_components.get(debug_part, 0)}")
-            else:
-                print(f"    ❌ No Component Demand rows found for {debug_part}")
-                print(f"    Final committed in dictionary: {committed_components.get(debug_part, 0)}")
-            
-            print("-" * 80)
+    performance_tracker.end_phase()
+    
+    # DEBUG: Show committed components
+    if DEBUG_MODE:
+        print(f"\n🔍 DEBUG: Committed components")
+        print(f"   Total committed parts: {committed_parts_count}")
+        print(f"   Total committed quantity: {total_committed_qty}")
+        if DEBUG_COMPONENT_PART and str(DEBUG_COMPONENT_PART) in committed_components:
+            print(f"   🎯 DEBUG PART {DEBUG_COMPONENT_PART}: {committed_components[str(DEBUG_COMPONENT_PART)]} committed")
+
+    # Show detailed committed components building process for debug component
+    if DEBUG_COMPONENT_PART is not None:
+        debug_part = str(DEBUG_COMPONENT_PART)
+        print(f"\n🔍 DEBUG: Committed components building process for {debug_part}")
+        # Show raw Component Demand data
+        print(f"  🔒 Raw Component Demand data for {debug_part}:")
+        committed_raw = df_component_demand[df_component_demand["Component Part Number"].astype(str) == debug_part]
+        if not committed_raw.empty:
+            total_committed = 0
+            for _, row in committed_raw.iterrows():
+                qty = row['Component Qty Required']
+                total_committed += qty
+                print(f"    Row: Component='{row['Component Part Number']}', Qty Required={qty}")
+            print(f"    Total committed from Component Demand: {total_committed}")
+            print(f"    Final committed in dictionary: {committed_components.get(debug_part, 0)}")
+        else:
+            print(f"    ❌ No Component Demand rows found for {debug_part}")
+            print(f"    Final committed in dictionary: {committed_components.get(debug_part, 0)}")
+        print("-" * 80)
 
     # Initialize used_components with the committed quantities
     used_components = committed_components.copy()
@@ -390,6 +495,9 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
     if DEBUG_MODE and DEBUG_COMPONENT_PART is not None:
         print(f"\n🎯 DEBUG: Starting to process orders that use component {DEBUG_COMPONENT_PART}")
         print("="*80)
+    
+    # Start timing the main order processing loop
+    performance_tracker.start_phase("Process Orders")
     
     for _, row in filtered_df_main.iterrows():
         processed += 1
@@ -984,6 +1092,9 @@ def process_single_scenario(filepath, scenario_name, status_callback=None, scena
         
         print("="*60)
     
+    # End timing the main order processing loop
+    performance_tracker.end_phase()
+    
     return {
         'name': scenario_name,
         'filepath': filepath,
@@ -1086,6 +1197,11 @@ def load_and_process_files():
         # Clear the UI and start fresh
         status_var.set("🔄 Initializing...")
         root.update_idletasks()
+        
+        # Reset performance tracker for this run
+        performance_tracker.cleanup()
+        performance_tracker.phases.clear()
+        performance_tracker.memory_usage.clear()
         
         start_time = time.time()
         main_frame.configure(style='TFrame')
@@ -1795,8 +1911,9 @@ def load_and_process_files():
 
 💾 Results saved to: {os.path.basename(output_file) if output_file else 'No export (Quick Analysis Mode)'}"""
         
+        # Insert summary text and performance report
         results_text.delete(1.0, tk.END)
-        results_text.insert(1.0, summary_text)
+        results_text.insert(1.0, summary_text.strip() + "\n\n" + generate_performance_report())
         
         # For status bar
         if minmax_mode:
@@ -1810,7 +1927,7 @@ def load_and_process_files():
             total_orders = scenarios[0]['metrics']['total_orders']
             total_releasable = scenarios[0]['metrics']['releasable_count']
             status_var.set(f"✅ PROCESSING COMPLETE! {total_releasable:,}/{total_orders:,} orders releasable in {processing_time:.1f}s")
-            
+        
         main_frame.configure(style='Success.TFrame')
         
     except Exception as e:
@@ -1824,6 +1941,66 @@ def copy_summary_to_clipboard():
     root.update()
     copy_btn.config(text="✅ Copied!")
     root.after(2000, lambda: copy_btn.config(text="📋 Copy Summary"))
+
+def generate_performance_report():
+    """Generate detailed performance report with phase breakdown"""
+    phase_summary = performance_tracker.get_phase_summary()
+    memory_summary = performance_tracker.get_memory_summary()
+    
+    report = []
+    report.append("🔍 DETAILED PERFORMANCE ANALYSIS")
+    report.append("=" * 50)
+    
+    # Phase breakdown
+    report.append("\n📊 PHASE BREAKDOWN:")
+    total_time = 0
+    for phase, metrics in phase_summary.items():
+        total_time += metrics['total_time']
+        report.append(f"   {phase}:")
+        report.append(f"     Total Time: {metrics['total_time']:.3f}s")
+        report.append(f"     Average Time: {metrics['avg_time']:.3f}s")
+        report.append(f"     Count: {metrics['count']}")
+        report.append(f"     Min/Max: {metrics['min_time']:.3f}s / {metrics['max_time']:.3f}s")
+    
+    # Calculate percentages
+    report.append(f"\n📈 TIME DISTRIBUTION:")
+    for phase, metrics in phase_summary.items():
+        percentage = (metrics['total_time'] / total_time * 100) if total_time > 0 else 0
+        report.append(f"   {phase}: {percentage:.1f}% ({metrics['total_time']:.3f}s)")
+    
+    # Memory usage
+    if memory_summary:
+        report.append(f"\n💾 MEMORY USAGE:")
+        report.append(f"   Peak Memory: {memory_summary['peak_memory_mb']:.1f} MB")
+        report.append(f"   Average Memory: {memory_summary['avg_memory_mb']:.1f} MB")
+        report.append(f"   Initial Memory: {memory_summary['initial_memory_mb']:.1f} MB")
+        report.append(f"   Final Memory: {memory_summary['final_memory_mb']:.1f} MB")
+        report.append(f"   Memory Growth: {memory_summary['final_memory_mb'] - memory_summary['initial_memory_mb']:.1f} MB")
+    
+    # Performance insights
+    report.append(f"\n💡 PERFORMANCE INSIGHTS:")
+    if phase_summary:
+        slowest_phase = max(phase_summary.items(), key=lambda x: x[1]['total_time'])
+        fastest_phase = min(phase_summary.items(), key=lambda x: x[1]['total_time'])
+        
+        report.append(f"   Slowest Phase: {slowest_phase[0]} ({slowest_phase[1]['total_time']:.3f}s)")
+        report.append(f"   Fastest Phase: {fastest_phase[0]} ({fastest_phase[1]['total_time']:.3f}s)")
+        
+        # Bottleneck analysis
+        if slowest_phase[1]['total_time'] > total_time * 0.5:  # If slowest phase is >50% of total time
+            report.append(f"   ⚠️  BOTTLENECK DETECTED: {slowest_phase[0]} is consuming {slowest_phase[1]['total_time']/total_time*100:.1f}% of total time")
+        
+        # Excel vs Processing analysis
+        excel_phases = [p for p in phase_summary.keys() if 'Load' in p or 'Excel' in p]
+        processing_phases = [p for p in phase_summary.keys() if p not in excel_phases and p != 'Total Processing']
+        
+        excel_time = sum(phase_summary[p]['total_time'] for p in excel_phases)
+        processing_time = sum(phase_summary[p]['total_time'] for p in processing_phases)
+        
+        report.append(f"\n   Excel Operations: {excel_time:.3f}s ({excel_time/total_time*100:.1f}%)")
+        report.append(f"   Processing Operations: {processing_time:.3f}s ({processing_time/total_time*100:.1f}%)")
+    
+    return "\n".join(report)
 
 # Create GUI
 root = tk.Tk()
