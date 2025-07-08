@@ -11,9 +11,103 @@ import pymssql
 from dotenv import load_dotenv
 import sys
 from sqlalchemy import create_engine, text
+import psutil
+import gc
 
 # Load environment variables
 load_dotenv('db_credentials.env')
+
+# Performance tracking utilities
+class PerformanceTracker:
+    """Track performance metrics across different phases"""
+    
+    def __init__(self):
+        self.phases = {}
+        self.current_phase = None
+        self.phase_start_time = None
+        self.memory_usage = []
+        self.process = psutil.Process()
+    
+    def start_phase(self, phase_name):
+        """Start timing a new phase"""
+        if self.current_phase:
+            self.end_phase()
+        
+        self.current_phase = phase_name
+        self.phase_start_time = time.time()
+        memory_info = self.process.memory_info()
+        self.memory_usage.append({
+            'phase': phase_name,
+            'memory_mb': memory_info.rss / 1024 / 1024,
+            'timestamp': time.time()
+        })
+    
+    def end_phase(self):
+        """End the current phase and record timing"""
+        if self.current_phase and self.phase_start_time:
+            duration = time.time() - self.phase_start_time
+            if self.current_phase not in self.phases:
+                self.phases[self.current_phase] = []
+            self.phases[self.current_phase].append(duration)
+            
+            # Record final memory usage for this phase
+            memory_info = self.process.memory_info()
+            self.memory_usage.append({
+                'phase': f"{self.current_phase}_end",
+                'memory_mb': memory_info.rss / 1024 / 1024,
+                'timestamp': time.time()
+            })
+            
+            self.current_phase = None
+            self.phase_start_time = None
+    
+    def get_phase_summary(self):
+        """Get summary of all phases"""
+        summary = {}
+        for phase, times in self.phases.items():
+            if times:
+                summary[phase] = {
+                    'total_time': sum(times),
+                    'avg_time': sum(times) / len(times),
+                    'count': len(times),
+                    'min_time': min(times),
+                    'max_time': max(times)
+                }
+        return summary
+    
+    def get_memory_summary(self):
+        """Get memory usage summary"""
+        if not self.memory_usage:
+            return {}
+        
+        memory_values = [m['memory_mb'] for m in self.memory_usage]
+        return {
+            'peak_memory_mb': max(memory_values),
+            'avg_memory_mb': sum(memory_values) / len(memory_values),
+            'initial_memory_mb': self.memory_usage[0]['memory_mb'] if self.memory_usage else 0,
+            'final_memory_mb': self.memory_usage[-1]['memory_mb'] if self.memory_usage else 0
+        }
+    
+    def cleanup(self):
+        """Clean up and end any current phase"""
+        if self.current_phase:
+            self.end_phase()
+
+# Global performance tracker
+performance_tracker = PerformanceTracker()
+
+def timing_decorator(phase_name):
+    """Decorator to automatically time function execution"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            performance_tracker.start_phase(phase_name)
+            try:
+                result = func(*args, **kwargs)
+                return result
+            finally:
+                performance_tracker.end_phase()
+        return wrapper
+    return decorator
 
 # VERSION INFO
 VERSION = "v2.0.0"
@@ -85,6 +179,7 @@ if DEBUG_MODE:
     print("     - Column: 'Planner' → Planner code")
     print("="*60 + "\n")
 
+@timing_decorator("Database Connection")
 def get_database_connection():
     """Create and return a SQLAlchemy engine for SQL Server"""
     try:
@@ -106,6 +201,7 @@ def get_database_connection():
     except Exception as e:
         raise Exception(f"SQL Server connection failed: {str(e)}")
 
+@timing_decorator("Query Execution")
 def execute_query(query, params=None):
     """Execute a SQL query and return results as a pandas DataFrame"""
     engine = None
@@ -123,6 +219,7 @@ def execute_query(query, params=None):
         if engine:
             engine.dispose()
 
+@timing_decorator("Load Demand Data")
 def load_demand_data():
     """Load demand data from database"""
     query = """
@@ -146,6 +243,7 @@ def load_demand_data():
     """
     return execute_query(query)
 
+@timing_decorator("Load Planned Demand Data")
 def load_planned_demand_data():
     """Load planned demand (BOM) data from database"""
     query = """
@@ -166,6 +264,7 @@ def load_planned_demand_data():
     """
     return execute_query(query)
 
+@timing_decorator("Load Component Demand Data")
 def load_component_demand_data():
     """Load committed component demand data from database"""
     query = """
@@ -186,6 +285,7 @@ def load_component_demand_data():
 	"""
     return execute_query(query)
 
+@timing_decorator("Load IPIS Data")
 def load_ipis_data():
     """Load stock data from IPIS table"""
     query = """
@@ -213,6 +313,7 @@ def load_ipis_data():
 	"""
     return execute_query(query)
 
+@timing_decorator("Load Hours Data")
 def load_hours_data():
     """Load labor standards data from database"""
     query = """
@@ -249,6 +350,7 @@ def load_hours_data():
     """
     return execute_query(query)
 
+@timing_decorator("Load POs Data")
 def load_pos_data():
     """Load purchase orders data from database"""
     query = """
@@ -344,6 +446,7 @@ def get_sorting_strategies():
         {"name": "Planner (Z-A)", "columns": ["Planner", "Start Date"], "ascending": [False, True]}
     ]
 
+@timing_decorator("Build Stock Dictionary")
 def build_stock_dictionary(df_ipis):
     """Build stock dict using IPIS as primary source"""
     stock = {}
@@ -361,6 +464,9 @@ def build_stock_dictionary(df_ipis):
 def process_single_scenario(scenario_name, status_callback=None, scenario_num=1, total_scenarios=1, sorting_strategy=None, include_kits=True, include_instruments=True, include_virtuoso=True, include_kit_samples=True):
     """Process a single scenario from database and return results with live progress updates"""
     
+    # Start overall processing timing
+    performance_tracker.start_phase("Total Processing")
+    
     if status_callback:
         strategy_name = sorting_strategy["name"] if sorting_strategy else "Default"
         status_callback(f"📂 [Scenario {scenario_num}/{total_scenarios}] Loading data from database ({strategy_name})...")
@@ -374,6 +480,7 @@ def process_single_scenario(scenario_name, status_callback=None, scenario_num=1,
         df_hours = load_hours_data()
         df_pos = load_pos_data()
     except Exception as e:
+        performance_tracker.end_phase()  # End total processing
         raise Exception(f"Failed to load data from database: {str(e)}")
     
     # DEBUG: Show data loading results
@@ -610,6 +717,9 @@ def process_single_scenario(scenario_name, status_callback=None, scenario_num=1,
     filtered_df_main = filtered_df_main.reset_index(drop=True)
     
     results = []
+    # Start order processing timing
+    performance_tracker.start_phase("Order Processing")
+    
     processed = 0
     total = len(filtered_df_main)
     
@@ -1217,6 +1327,10 @@ def process_single_scenario(scenario_name, status_callback=None, scenario_num=1,
                 print(f"\n    Total Shop Orders trying to allocate {debug_part}: {component_allocation_count}")
         
         print("="*60)
+    
+    # End order processing and total processing phases
+    performance_tracker.end_phase()  # End Order Processing
+    performance_tracker.end_phase()  # End Total Processing
     
     return {
         'name': scenario_name,
@@ -2003,8 +2117,12 @@ def load_and_process_database():
 
 💾 Results saved to: {os.path.basename(output_file) if output_file else 'No export (Quick Analysis Mode)'}"""
         
+        # Add performance report to the summary
+        performance_report = generate_performance_report()
+        full_summary = summary_text + "\n\n" + performance_report
+        
         results_text.delete(1.0, tk.END)
-        results_text.insert(1.0, summary_text)
+        results_text.insert(1.0, full_summary)
         
         # For status bar
         if minmax_mode:
@@ -2024,6 +2142,66 @@ def load_and_process_database():
     except Exception as e:
         messagebox.showerror("Error", f"Processing failed:\n\n{str(e)}")
         status_var.set("❌ Processing failed")
+
+def generate_performance_report():
+    """Generate detailed performance report with phase breakdown"""
+    phase_summary = performance_tracker.get_phase_summary()
+    memory_summary = performance_tracker.get_memory_summary()
+    
+    report = []
+    report.append("🔍 DETAILED PERFORMANCE ANALYSIS")
+    report.append("=" * 50)
+    
+    # Phase breakdown
+    report.append("\n📊 PHASE BREAKDOWN:")
+    total_time = 0
+    for phase, metrics in phase_summary.items():
+        total_time += metrics['total_time']
+        report.append(f"   {phase}:")
+        report.append(f"     Total Time: {metrics['total_time']:.3f}s")
+        report.append(f"     Average Time: {metrics['avg_time']:.3f}s")
+        report.append(f"     Count: {metrics['count']}")
+        report.append(f"     Min/Max: {metrics['min_time']:.3f}s / {metrics['max_time']:.3f}s")
+    
+    # Calculate percentages
+    report.append(f"\n📈 TIME DISTRIBUTION:")
+    for phase, metrics in phase_summary.items():
+        percentage = (metrics['total_time'] / total_time * 100) if total_time > 0 else 0
+        report.append(f"   {phase}: {percentage:.1f}% ({metrics['total_time']:.3f}s)")
+    
+    # Memory usage
+    if memory_summary:
+        report.append(f"\n💾 MEMORY USAGE:")
+        report.append(f"   Peak Memory: {memory_summary['peak_memory_mb']:.1f} MB")
+        report.append(f"   Average Memory: {memory_summary['avg_memory_mb']:.1f} MB")
+        report.append(f"   Initial Memory: {memory_summary['initial_memory_mb']:.1f} MB")
+        report.append(f"   Final Memory: {memory_summary['final_memory_mb']:.1f} MB")
+        report.append(f"   Memory Growth: {memory_summary['final_memory_mb'] - memory_summary['initial_memory_mb']:.1f} MB")
+    
+    # Performance insights
+    report.append(f"\n💡 PERFORMANCE INSIGHTS:")
+    if phase_summary:
+        slowest_phase = max(phase_summary.items(), key=lambda x: x[1]['total_time'])
+        fastest_phase = min(phase_summary.items(), key=lambda x: x[1]['total_time'])
+        
+        report.append(f"   Slowest Phase: {slowest_phase[0]} ({slowest_phase[1]['total_time']:.3f}s)")
+        report.append(f"   Fastest Phase: {fastest_phase[0]} ({fastest_phase[1]['total_time']:.3f}s)")
+        
+        # Bottleneck analysis
+        if slowest_phase[1]['total_time'] > total_time * 0.5:  # If slowest phase is >50% of total time
+            report.append(f"   ⚠️  BOTTLENECK DETECTED: {slowest_phase[0]} is consuming {slowest_phase[1]['total_time']/total_time*100:.1f}% of total time")
+        
+        # Database vs Processing analysis
+        db_phases = [p for p in phase_summary.keys() if 'Load' in p or 'Database' in p or 'Query' in p]
+        processing_phases = [p for p in phase_summary.keys() if p not in db_phases and p != 'Total Processing']
+        
+        db_time = sum(phase_summary[p]['total_time'] for p in db_phases)
+        processing_time = sum(phase_summary[p]['total_time'] for p in processing_phases)
+        
+        report.append(f"\n   Database Operations: {db_time:.3f}s ({db_time/total_time*100:.1f}%)")
+        report.append(f"   Processing Operations: {processing_time:.3f}s ({processing_time/total_time*100:.1f}%)")
+    
+    return "\n".join(report)
 
 def copy_summary_to_clipboard():
     summary_text_content = results_text.get("1.0", tk.END).strip()
