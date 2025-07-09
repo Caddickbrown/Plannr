@@ -179,7 +179,6 @@ if DEBUG_MODE:
     print("     - Column: 'Planner' → Planner code")
     print("="*60 + "\n")
 
-@timing_decorator("Database Connection")
 def get_database_connection():
     """Create and return a SQLAlchemy engine for SQL Server"""
     try:
@@ -201,7 +200,6 @@ def get_database_connection():
     except Exception as e:
         raise Exception(f"SQL Server connection failed: {str(e)}")
 
-@timing_decorator("Query Execution")
 def execute_query(query, params=None):
     """Execute a SQL query and return results as a pandas DataFrame"""
     engine = None
@@ -471,8 +469,14 @@ def process_single_scenario(scenario_name, status_callback=None, scenario_num=1,
         strategy_name = sorting_strategy["name"] if sorting_strategy else "Default"
         status_callback(f"📂 [Scenario {scenario_num}/{total_scenarios}] Loading data from database ({strategy_name})...")
     
-    # Load the data from database
+    # Load the data from database with proper timing separation
     try:
+        # Test database connection first (this will be included in the data loading timing)
+        performance_tracker.start_phase("Database Connection")
+        test_connection = get_database_connection()
+        performance_tracker.end_phase()
+        
+        # Load all data tables
         df_main = load_demand_data()
         df_struct = load_planned_demand_data()
         df_component_demand = load_component_demand_data()
@@ -1422,6 +1426,9 @@ def process_single_scenario(scenario_name, status_callback=None, scenario_num=1,
 def load_and_process_database():
     """Load and process data from database instead of Excel files"""
     
+    # Reset performance tracker for this run
+    performance_tracker.cleanup()
+    
     # Test database connection first
     connection_success, connection_message = test_database_connection()
     if not connection_success:
@@ -2191,8 +2198,8 @@ def generate_performance_report():
         if slowest_phase[1]['total_time'] > total_time * 0.5:  # If slowest phase is >50% of total time
             report.append(f"   ⚠️  BOTTLENECK DETECTED: {slowest_phase[0]} is consuming {slowest_phase[1]['total_time']/total_time*100:.1f}% of total time")
         
-        # Database vs Processing analysis
-        db_phases = [p for p in phase_summary.keys() if 'Load' in p or 'Database' in p or 'Query' in p]
+        # Database vs Processing analysis with improved categorization
+        db_phases = [p for p in phase_summary.keys() if any(term in p for term in ['Load', 'Database', 'Connection'])]
         processing_phases = [p for p in phase_summary.keys() if p not in db_phases and p != 'Total Processing']
         
         db_time = sum(phase_summary[p]['total_time'] for p in db_phases)
@@ -2200,6 +2207,22 @@ def generate_performance_report():
         
         report.append(f"\n   Database Operations: {db_time:.3f}s ({db_time/total_time*100:.1f}%)")
         report.append(f"   Processing Operations: {processing_time:.3f}s ({processing_time/total_time*100:.1f}%)")
+        
+        # Additional insights for database operations
+        if db_phases:
+            report.append(f"\n   📊 DATABASE BREAKDOWN:")
+            for phase in db_phases:
+                phase_time = phase_summary[phase]['total_time']
+                phase_pct = (phase_time / db_time * 100) if db_time > 0 else 0
+                report.append(f"     {phase}: {phase_time:.3f}s ({phase_pct:.1f}% of DB time)")
+        
+        # Additional insights for processing operations
+        if processing_phases:
+            report.append(f"\n   🔧 PROCESSING BREAKDOWN:")
+            for phase in processing_phases:
+                phase_time = phase_summary[phase]['total_time']
+                phase_pct = (phase_time / processing_time * 100) if processing_time > 0 else 0
+                report.append(f"     {phase}: {phase_time:.3f}s ({phase_pct:.1f}% of processing time)")
     
     return "\n".join(report)
 

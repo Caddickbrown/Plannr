@@ -5,6 +5,6 @@ setup(
     options={'py2exe': {'compressed': True}},
     windows=[{
         'script': 'AMCBDG.py',
-        'icon_resources': [(1, 'AMCBDG2.ico')]
+        'icon_resources': [(1, 'Assets/PlanSnapGreen.ico')]
     }]
 )
