@@ -1651,16 +1651,16 @@ def load_and_process_database():
         
         # Save results
         if not no_export_var.get():
-            # Save results
-            output_dir = os.getcwd()  # Use current directory for database results
+            # Save results directly to desktop
+            desktop_path = os.path.join(os.path.expanduser("~"), "OneDrive - BVI\Desktop")
             timestamp = datetime.now().strftime('%Y%m%d_%H%M')
             
             if minmax_mode:
-                output_file = os.path.join(output_dir, f"MinMax_Optimization_Analysis_{VERSION}_{timestamp}.xlsx")
+                output_file = os.path.join(desktop_path, f"MinMax_Optimization_Analysis_{VERSION}_{timestamp}.xlsx")
             elif len(scenarios) > 1:
-                output_file = os.path.join(output_dir, f"Multi_Scenario_Analysis_{VERSION}_{timestamp}.xlsx")
+                output_file = os.path.join(desktop_path, f"Multi_Scenario_Analysis_{VERSION}_{timestamp}.xlsx")
             else:
-                output_file = os.path.join(output_dir, f"Material_Release_Plan_{VERSION}_{timestamp}.xlsx")
+                output_file = os.path.join(desktop_path, f"Material_Release_Plan_{VERSION}_{timestamp}.xlsx")
             
             status_var.set("💾 Saving optimization results...")
             root.update_idletasks()
@@ -1933,7 +1933,7 @@ def load_and_process_database():
                             # Format with 1 decimal place
                             for cell in comp_worksheet[col_letter][1:]:
                                 cell.number_format = '#,##0.0'
-                        elif any(term in col_name for term in ['Orders', 'Qty', 'Count', 'Parts']):
+                        elif any(term in str(col_name) for term in ['Orders', 'Qty', 'Count', 'Parts']):
                             # Format as whole number with thousands separator
                             for cell in comp_worksheet[col_letter][1:]:
                                 cell.number_format = '#,##0'
