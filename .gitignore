@@ -1,2 +1,3 @@
 db_credentials.env
 config.py
+dist/
