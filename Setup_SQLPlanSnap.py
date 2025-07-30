@@ -7,7 +7,8 @@ setup(
             'compressed': True,
             'includes': [
                 'sqlalchemy.dialects.mssql.pyodbc',
-                'pyodbc'
+                'pyodbc',
+		'pymssql'
             ]
         }
     },

@@ -13,6 +13,7 @@ import sys
 from sqlalchemy import create_engine, text
 import psutil
 import gc
+from io import BytesIO
 
 # Load environment variables
 load_dotenv('db_credentials.env')
@@ -111,11 +112,14 @@ def timing_decorator(phase_name):
 
 # VERSION INFO
 VERSION = "v2.0.0"
-VERSION_DATE = "2025-07-08"
+VERSION_DATE = "2025-07-29"
 DEBUG_MODE = False
 DEBUG_COMPONENT_PART = None  # Set to a specific part number (as string) to track, e.g. "8034855"
 DEBUG_SO_NUMBER = 9682591
       # Set to a specific SO number (as string) to track, e.g. "9678417"
+
+# Global variables
+quick_analysis_excel_buffer = None
 
 # Database configuration
 DB_HOST = os.getenv('DB_HOST', 'localhost')
@@ -1424,6 +1428,7 @@ def process_single_scenario(scenario_name, status_callback=None, scenario_num=1,
     }
 
 def load_and_process_database():
+    global quick_analysis_excel_buffer
     """Load and process data from database instead of Excel files"""
     
     # Reset performance tracker for this run
@@ -1649,8 +1654,94 @@ def load_and_process_database():
         
         orders_per_second = total_orders_processed / processing_time if processing_time > 0 else 0
         
+        # Create summary sheet (move this above export logic so it's always defined)
+        summary_items = [
+            ('Tool Version', f"{VERSION} ({VERSION_DATE})"),
+            ('Processing Date', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+            ('Processing Mode', "Min/Max Optimization" if minmax_mode else "Standard"),
+            ('Files Processed Count', len(files_processed_list_for_summary)),
+            ('Strategies Tested / Scenarios', len(scenarios_for_comparison) if minmax_mode else len(scenarios)),
+            ('Optimal Strategies / Scenarios Saved', len(scenarios)),
+            ('--- Material Categories Processed ---', '---'),
+            ('Kits Included', "Yes" if include_kits_var.get() else "No"),
+            ('Instruments Included', "Yes" if include_instruments_var.get() else "No"),
+            ('Virtuoso Included', "Yes" if include_virtuoso_var.get() else "No"),
+            ('Kit Samples Included', "Yes" if include_kit_samples_var.get() else "No"),
+            ('--- Overall Performance ---', '---'),
+            ('Total Orders Processed', f"{total_orders_processed:,}"),
+            ('Total Demand Quantity', f"{source_metrics.get('total_qty', 0):,}"),
+            ('Total Demand Hours', f"{source_metrics.get('total_hours', 0):,.1f}"),
+            ('Releasable Orders', f"{source_metrics.get('releasable_count', 0):,}"),
+            ('Releasable Quantity', f"{source_metrics.get('releasable_qty', 0):,.1f}"),
+            ('Releasable Hours', f"{source_metrics.get('releasable_hours', 0):,.1f}"),
+            ('--- Total Kits Processed ---', '---'),
+            ('Total Kits Processed (Orders)', f"{source_metrics.get('total_kits_count', 0):,}"),
+            ('Total Kits Processed (Hours)', f"{source_metrics.get('total_kits_hours', 0):,.1f}"),
+            ('Total Kits Processed (Quantity)', f"{source_metrics.get('total_kits_qty', 0):,}"),
+            ('--- Releasable Kits Breakdown ---', '---'),
+            ('Total Releasable Kits (Orders)', f"{source_metrics.get('releasable_kits_count', 0):,}"),
+            ('Total Releasable Kits (Hours)', f"{source_metrics.get('releasable_kits_hours', 0):,.1f}"),
+            ('Total Releasable Kits (Quantity)', f"{source_metrics.get('releasable_kits_qty', 0):,}"),
+            ('Kits Release Rate (Orders %)', f"{source_metrics.get('releasable_kits_count', 0)/source_metrics.get('total_kits_count', 1)*100:.1f}%" if source_metrics.get('total_kits_count', 0) > 0 else "0%"),
+            ('Kits Release Rate (Hours %)', f"{source_metrics.get('releasable_kits_hours', 0)/source_metrics.get('total_kits_hours', 1)*100:.1f}%" if source_metrics.get('total_kits_hours', 0) > 0 else "0%"),
+            ('Kits Release Rate (Quantity %)', f"{source_metrics.get('releasable_kits_qty', 0)/source_metrics.get('total_kits_qty', 1)*100:.1f}%" if source_metrics.get('total_kits_qty', 0) > 0 else "0%"),
+            ('  BVI Kits (Orders)', f"{source_metrics.get('releasable_bvi_kits_count', 0):,}"),
+            ('  BVI Kits (Hours)', f"{source_metrics.get('releasable_bvi_kits_hours', 0):,.1f}"),
+            ('  BVI Kits (Quantity)', f"{source_metrics.get('releasable_bvi_kits_qty', 0):,}"),
+            ('  BVI Kits Release Rate (%)', f"{source_metrics.get('releasable_bvi_kits_count', 0)/source_metrics.get('total_bvi_kits_count', 1)*100:.1f}%" if source_metrics.get('total_bvi_kits_count', 0) > 0 else "0%"),
+            ('  Malosa Kits (Orders)', f"{source_metrics.get('releasable_malosa_kits_count', 0):,}"),
+            ('  Malosa Kits (Hours)', f"{source_metrics.get('releasable_malosa_kits_hours', 0):,.1f}"),
+            ('  Malosa Kits (Quantity)', f"{source_metrics.get('releasable_malosa_kits_qty', 0):,}"),
+            ('  Malosa Kits Release Rate (%)', f"{source_metrics.get('releasable_malosa_kits_count', 0)/source_metrics.get('total_malosa_kits_count', 1)*100:.1f}%" if source_metrics.get('total_malosa_kits_count', 0) > 0 else "0%"),
+            ('--- Total Instruments Processed ---', '---'),
+            ('Total Instruments Processed (Orders)', f"{source_metrics.get('total_instruments_count', 0):,}"),
+            ('Total Instruments Processed (Hours)', f"{source_metrics.get('total_instruments_hours', 0):,.1f}"),
+            ('Total Instruments Processed (Quantity)', f"{source_metrics.get('total_instruments_qty', 0):,}"),
+            ('--- Releasable Instruments Breakdown ---', '---'),
+            ('Total Releasable Instruments (Orders)', f"{source_metrics.get('releasable_instruments_count', 0):,}"),
+            ('Total Releasable Instruments (Hours)', f"{source_metrics.get('releasable_instruments_hours', 0):,.1f}"),
+            ('Total Releasable Instruments (Quantity)', f"{source_metrics.get('releasable_instruments_qty', 0):,}"),
+            ('Instruments Release Rate (Orders %)', f"{source_metrics.get('releasable_instruments_count', 0)/source_metrics.get('total_instruments_count', 1)*100:.1f}%" if source_metrics.get('total_instruments_count', 0) > 0 else "0%"),
+            ('Instruments Release Rate (Hours %)', f"{source_metrics.get('releasable_instruments_hours', 0)/source_metrics.get('total_instruments_hours', 1)*100:.1f}%" if source_metrics.get('total_instruments_hours', 0) > 0 else "0%"),
+            ('Instruments Release Rate (Quantity %)', f"{source_metrics.get('releasable_instruments_qty', 0)/source_metrics.get('total_instruments_qty', 1)*100:.1f}%" if source_metrics.get('total_instruments_qty', 0) > 0 else "0%"),
+            ('  Manufacturing (3802 Orders)', f"{source_metrics.get('releasable_manufacturing_count', 0):,}"),
+            ('  Manufacturing (3802 Hours)', f"{source_metrics.get('releasable_manufacturing_hours', 0):,.1f}"),
+            ('  Manufacturing (3802 Quantity)', f"{source_metrics.get('releasable_manufacturing_qty', 0):,}"),
+            ('  Manufacturing Release Rate (%)', f"{source_metrics.get('releasable_manufacturing_count', 0)/source_metrics.get('total_manufacturing_count', 1)*100:.1f}%" if source_metrics.get('total_manufacturing_count', 0) > 0 else "0%"),
+            ('  Assembly (3803 Orders)', f"{source_metrics.get('releasable_assembly_count', 0):,}"),
+            ('  Assembly (3803 Hours)', f"{source_metrics.get('releasable_assembly_hours', 0):,.1f}"),
+            ('  Assembly (3803 Quantity)', f"{source_metrics.get('releasable_assembly_qty', 0):,}"),
+            ('  Assembly Release Rate (%)', f"{source_metrics.get('releasable_assembly_count', 0)/source_metrics.get('total_assembly_count', 1)*100:.1f}%" if source_metrics.get('total_assembly_count', 0) > 0 else "0%"),
+            ('  Packaging (3804 Orders)', f"{source_metrics.get('releasable_packaging_count', 0):,}"),
+            ('  Packaging (3804 Hours)', f"{source_metrics.get('releasable_packaging_hours', 0):,.1f}"),
+            ('  Packaging (3804 Quantity)', f"{source_metrics.get('releasable_packaging_qty', 0):,}"),
+            ('  Packaging Release Rate (%)', f"{source_metrics.get('releasable_packaging_count', 0)/source_metrics.get('total_packaging_count', 1)*100:.1f}%" if source_metrics.get('total_packaging_count', 0) > 0 else "0%"),
+            ('  Malosa Instruments (3805 Orders)', f"{source_metrics.get('releasable_malosa_instruments_count', 0):,}"),
+            ('  Malosa Instruments (3805 Hours)', f"{source_metrics.get('releasable_malosa_instruments_hours', 0):,.1f}"),
+            ('  Malosa Instruments (3805 Quantity)', f"{source_metrics.get('releasable_malosa_instruments_qty', 0):,}"),
+            ('  Malosa Instruments Release Rate (%)', f"{source_metrics.get('releasable_malosa_instruments_count', 0)/source_metrics.get('total_malosa_instruments_count', 1)*100:.1f}%" if source_metrics.get('total_malosa_instruments_count', 0) > 0 else "0%"),
+            ('--- Total Virtuoso Processed ---', '---'),
+            ('Total Virtuoso Processed (Orders)', f"{source_metrics.get('total_virtuoso_count', 0):,}"),
+            ('Total Virtuoso Processed (Hours)', f"{source_metrics.get('total_virtuoso_hours', 0):,.1f}"),
+            ('Total Virtuoso Processed (Quantity)', f"{source_metrics.get('total_virtuoso_qty', 0):,}"),
+            ('--- Releasable Virtuoso Breakdown ---', '---'),
+            ('Releasable Virtuoso (Orders)', f"{source_metrics.get('releasable_virtuoso_count', 0):,}"),
+            ('Releasable Virtuoso (Hours)', f"{source_metrics.get('releasable_virtuoso_hours', 0):,.1f}"),
+            ('Releasable Virtuoso (Quantity)', f"{source_metrics.get('releasable_virtuoso_qty', 0):,}"),
+            ('Virtuoso Release Rate (Orders %)', f"{source_metrics.get('releasable_virtuoso_count', 0)/source_metrics.get('total_virtuoso_count', 1)*100:.1f}%" if source_metrics.get('total_virtuoso_count', 0) > 0 else "0%"),
+            ('Virtuoso Release Rate (Hours %)', f"{source_metrics.get('releasable_virtuoso_hours', 0)/source_metrics.get('total_virtuoso_hours', 1)*100:.1f}%" if source_metrics.get('total_virtuoso_hours', 0) > 0 else "0%"),
+            ('Virtuoso Release Rate (Quantity %)', f"{source_metrics.get('releasable_virtuoso_qty', 0)/source_metrics.get('total_virtuoso_qty', 1)*100:.1f}%" if source_metrics.get('total_virtuoso_qty', 0) > 0 else "0%"),
+            ('--- Processing Performance ---', '---'),
+            ('Total Processing Time (seconds)', f"{processing_time:.2f}"),
+            ('Processing Speed (orders/second)', f"{orders_per_second:.1f}"),
+            ('Avg Time per Strategy/Scenario (seconds)', f"{processing_time/len(scenarios_for_comparison):.2f}" if minmax_mode and scenarios_for_comparison else (f"{processing_time/len(scenarios):.2f}" if scenarios else "N/A")),
+            ('Processed File Names', "; ".join([os.path.basename(f) for f in files_processed_list_for_summary]))
+        ]
+        summary_data = pd.DataFrame(summary_items, columns=['Metric', 'Value'])
+        
         # Save results
         if not no_export_var.get():
+            quick_analysis_excel_buffer = None  # Not used in normal mode
             # Save results directly to desktop
             desktop_path = os.path.join(os.path.expanduser("~"), "OneDrive - BVI\Desktop")
             timestamp = datetime.now().strftime('%Y%m%d_%H%M')
@@ -1664,91 +1755,6 @@ def load_and_process_database():
             
             status_var.set("💾 Saving optimization results...")
             root.update_idletasks()
-            
-            # Create summary sheet
-            summary_items = [
-                ('Tool Version', f"{VERSION} ({VERSION_DATE})"),
-                ('Processing Date', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
-                ('Processing Mode', "Min/Max Optimization" if minmax_mode else "Standard"),
-                ('Files Processed Count', len(files_processed_list_for_summary)),
-                ('Strategies Tested / Scenarios', len(scenarios_for_comparison) if minmax_mode else len(scenarios)),
-                ('Optimal Strategies / Scenarios Saved', len(scenarios)),
-                ('--- Material Categories Processed ---', '---'),
-                ('Kits Included', "Yes" if include_kits_var.get() else "No"),
-                ('Instruments Included', "Yes" if include_instruments_var.get() else "No"),
-                ('Virtuoso Included', "Yes" if include_virtuoso_var.get() else "No"),
-                ('Kit Samples Included', "Yes" if include_kit_samples_var.get() else "No"),
-                ('--- Overall Performance ---', '---'),
-                ('Total Orders Processed', f"{total_orders_processed:,}"),
-                ('Total Demand Quantity', f"{source_metrics.get('total_qty', 0):,}"),
-                ('Total Demand Hours', f"{source_metrics.get('total_hours', 0):,.1f}"),
-                ('Releasable Orders', f"{source_metrics.get('releasable_count', 0):,}"),
-                ('Releasable Quantity', f"{source_metrics.get('releasable_qty', 0):,.1f}"),
-                ('Releasable Hours', f"{source_metrics.get('releasable_hours', 0):,.1f}"),
-                ('--- Total Kits Processed ---', '---'),
-                ('Total Kits Processed (Orders)', f"{source_metrics.get('total_kits_count', 0):,}"),
-                ('Total Kits Processed (Hours)', f"{source_metrics.get('total_kits_hours', 0):,.1f}"),
-                ('Total Kits Processed (Quantity)', f"{source_metrics.get('total_kits_qty', 0):,}"),
-                ('--- Releasable Kits Breakdown ---', '---'),
-                ('Total Releasable Kits (Orders)', f"{source_metrics.get('releasable_kits_count', 0):,}"),
-                ('Total Releasable Kits (Hours)', f"{source_metrics.get('releasable_kits_hours', 0):,.1f}"),
-                ('Total Releasable Kits (Quantity)', f"{source_metrics.get('releasable_kits_qty', 0):,}"),
-                ('Kits Release Rate (Orders %)', f"{source_metrics.get('releasable_kits_count', 0)/source_metrics.get('total_kits_count', 1)*100:.1f}%" if source_metrics.get('total_kits_count', 0) > 0 else "0%"),
-                ('Kits Release Rate (Hours %)', f"{source_metrics.get('releasable_kits_hours', 0)/source_metrics.get('total_kits_hours', 1)*100:.1f}%" if source_metrics.get('total_kits_hours', 0) > 0 else "0%"),
-                ('Kits Release Rate (Quantity %)', f"{source_metrics.get('releasable_kits_qty', 0)/source_metrics.get('total_kits_qty', 1)*100:.1f}%" if source_metrics.get('total_kits_qty', 0) > 0 else "0%"),
-                ('  BVI Kits (Orders)', f"{source_metrics.get('releasable_bvi_kits_count', 0):,}"),
-                ('  BVI Kits (Hours)', f"{source_metrics.get('releasable_bvi_kits_hours', 0):,.1f}"),
-                ('  BVI Kits (Quantity)', f"{source_metrics.get('releasable_bvi_kits_qty', 0):,}"),
-                ('  BVI Kits Release Rate (%)', f"{source_metrics.get('releasable_bvi_kits_count', 0)/source_metrics.get('total_bvi_kits_count', 1)*100:.1f}%" if source_metrics.get('total_bvi_kits_count', 0) > 0 else "0%"),
-                ('  Malosa Kits (Orders)', f"{source_metrics.get('releasable_malosa_kits_count', 0):,}"),
-                ('  Malosa Kits (Hours)', f"{source_metrics.get('releasable_malosa_kits_hours', 0):,.1f}"),
-                ('  Malosa Kits (Quantity)', f"{source_metrics.get('releasable_malosa_kits_qty', 0):,}"),
-                ('  Malosa Kits Release Rate (%)', f"{source_metrics.get('releasable_malosa_kits_count', 0)/source_metrics.get('total_malosa_kits_count', 1)*100:.1f}%" if source_metrics.get('total_malosa_kits_count', 0) > 0 else "0%"),
-                ('--- Total Instruments Processed ---', '---'),
-                ('Total Instruments Processed (Orders)', f"{source_metrics.get('total_instruments_count', 0):,}"),
-                ('Total Instruments Processed (Hours)', f"{source_metrics.get('total_instruments_hours', 0):,.1f}"),
-                ('Total Instruments Processed (Quantity)', f"{source_metrics.get('total_instruments_qty', 0):,}"),
-                ('--- Releasable Instruments Breakdown ---', '---'),
-                ('Total Releasable Instruments (Orders)', f"{source_metrics.get('releasable_instruments_count', 0):,}"),
-                ('Total Releasable Instruments (Hours)', f"{source_metrics.get('releasable_instruments_hours', 0):,.1f}"),
-                ('Total Releasable Instruments (Quantity)', f"{source_metrics.get('releasable_instruments_qty', 0):,}"),
-                ('Instruments Release Rate (Orders %)', f"{source_metrics.get('releasable_instruments_count', 0)/source_metrics.get('total_instruments_count', 1)*100:.1f}%" if source_metrics.get('total_instruments_count', 0) > 0 else "0%"),
-                ('Instruments Release Rate (Hours %)', f"{source_metrics.get('releasable_instruments_hours', 0)/source_metrics.get('total_instruments_hours', 1)*100:.1f}%" if source_metrics.get('total_instruments_hours', 0) > 0 else "0%"),
-                ('Instruments Release Rate (Quantity %)', f"{source_metrics.get('releasable_instruments_qty', 0)/source_metrics.get('total_instruments_qty', 1)*100:.1f}%" if source_metrics.get('total_instruments_qty', 0) > 0 else "0%"),
-                ('  Manufacturing (3802 Orders)', f"{source_metrics.get('releasable_manufacturing_count', 0):,}"),
-                ('  Manufacturing (3802 Hours)', f"{source_metrics.get('releasable_manufacturing_hours', 0):,.1f}"),
-                ('  Manufacturing (3802 Quantity)', f"{source_metrics.get('releasable_manufacturing_qty', 0):,}"),
-                ('  Manufacturing Release Rate (%)', f"{source_metrics.get('releasable_manufacturing_count', 0)/source_metrics.get('total_manufacturing_count', 1)*100:.1f}%" if source_metrics.get('total_manufacturing_count', 0) > 0 else "0%"),
-                ('  Assembly (3803 Orders)', f"{source_metrics.get('releasable_assembly_count', 0):,}"),
-                ('  Assembly (3803 Hours)', f"{source_metrics.get('releasable_assembly_hours', 0):,.1f}"),
-                ('  Assembly (3803 Quantity)', f"{source_metrics.get('releasable_assembly_qty', 0):,}"),
-                ('  Assembly Release Rate (%)', f"{source_metrics.get('releasable_assembly_count', 0)/source_metrics.get('total_assembly_count', 1)*100:.1f}%" if source_metrics.get('total_assembly_count', 0) > 0 else "0%"),
-                ('  Packaging (3804 Orders)', f"{source_metrics.get('releasable_packaging_count', 0):,}"),
-                ('  Packaging (3804 Hours)', f"{source_metrics.get('releasable_packaging_hours', 0):,.1f}"),
-                ('  Packaging (3804 Quantity)', f"{source_metrics.get('releasable_packaging_qty', 0):,}"),
-                ('  Packaging Release Rate (%)', f"{source_metrics.get('releasable_packaging_count', 0)/source_metrics.get('total_packaging_count', 1)*100:.1f}%" if source_metrics.get('total_packaging_count', 0) > 0 else "0%"),
-                ('  Malosa Instruments (3805 Orders)', f"{source_metrics.get('releasable_malosa_instruments_count', 0):,}"),
-                ('  Malosa Instruments (3805 Hours)', f"{source_metrics.get('releasable_malosa_instruments_hours', 0):,.1f}"),
-                ('  Malosa Instruments (3805 Quantity)', f"{source_metrics.get('releasable_malosa_instruments_qty', 0):,}"),
-                ('  Malosa Instruments Release Rate (%)', f"{source_metrics.get('releasable_malosa_instruments_count', 0)/source_metrics.get('total_malosa_instruments_count', 1)*100:.1f}%" if source_metrics.get('total_malosa_instruments_count', 0) > 0 else "0%"),
-                ('--- Total Virtuoso Processed ---', '---'),
-                ('Total Virtuoso Processed (Orders)', f"{source_metrics.get('total_virtuoso_count', 0):,}"),
-                ('Total Virtuoso Processed (Hours)', f"{source_metrics.get('total_virtuoso_hours', 0):,.1f}"),
-                ('Total Virtuoso Processed (Quantity)', f"{source_metrics.get('total_virtuoso_qty', 0):,}"),
-                ('--- Releasable Virtuoso Breakdown ---', '---'),
-                ('Releasable Virtuoso (Orders)', f"{source_metrics.get('releasable_virtuoso_count', 0):,}"),
-                ('Releasable Virtuoso (Hours)', f"{source_metrics.get('releasable_virtuoso_hours', 0):,.1f}"),
-                ('Releasable Virtuoso (Quantity)', f"{source_metrics.get('releasable_virtuoso_qty', 0):,}"),
-                ('Virtuoso Release Rate (Orders %)', f"{source_metrics.get('releasable_virtuoso_count', 0)/source_metrics.get('total_virtuoso_count', 1)*100:.1f}%" if source_metrics.get('total_virtuoso_count', 0) > 0 else "0%"),
-                ('Virtuoso Release Rate (Hours %)', f"{source_metrics.get('releasable_virtuoso_hours', 0)/source_metrics.get('total_virtuoso_hours', 1)*100:.1f}%" if source_metrics.get('total_virtuoso_hours', 0) > 0 else "0%"),
-                ('Virtuoso Release Rate (Quantity %)', f"{source_metrics.get('releasable_virtuoso_qty', 0)/source_metrics.get('total_virtuoso_qty', 1)*100:.1f}%" if source_metrics.get('total_virtuoso_qty', 0) > 0 else "0%"),
-                ('--- Processing Performance ---', '---'),
-                ('Total Processing Time (seconds)', f"{processing_time:.2f}"),
-                ('Processing Speed (orders/second)', f"{orders_per_second:.1f}"),
-                ('Avg Time per Strategy/Scenario (seconds)', f"{processing_time/len(scenarios_for_comparison):.2f}" if minmax_mode and scenarios_for_comparison else (f"{processing_time/len(scenarios):.2f}" if scenarios else "N/A")),
-                ('Processed File Names', "; ".join([os.path.basename(f) for f in files_processed_list_for_summary]))
-            ]
-            summary_data = pd.DataFrame(summary_items, columns=['Metric', 'Value'])
             
             # Create comparison data if multiple scenarios
             if len(scenarios_for_comparison) > 1:
@@ -2144,11 +2150,130 @@ def load_and_process_database():
             total_releasable = scenarios[0]['metrics']['releasable_count']
             status_var.set(f"✅ PROCESSING COMPLETE! {total_releasable:,}/{total_orders:,} orders releasable in {processing_time:.1f}s")
             
-        main_frame.configure(style='Success.TFrame')
+        # Set frame color based on mode - blue for quick mode, green for normal mode
+        if no_export_var.get():
+            main_frame.configure(style='Quick.TFrame')  # Blue for quick mode
+        else:
+            main_frame.configure(style='Success.TFrame')  # Green for normal mode
         
+        # Quick Analysis: Write to BytesIO buffer, don't save to disk
+        quick_analysis_excel_buffer = BytesIO()
+        with pd.ExcelWriter(quick_analysis_excel_buffer, engine='openpyxl') as writer:
+            # ... existing code for writing Excel ...
+            # (copy all Excel writing code here, but use writer as above)
+            # Define styles once at the start
+            header_fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+            separator_fill = PatternFill(start_color='F5F5F5', end_color='F5F5F5', fill_type='solid')
+            bold_font = Font(bold=True)
+            for scenario in scenarios:
+                sheet_name = scenario['name'][:31]
+                df = scenario['results_df'].copy()
+                numeric_columns = ['Demand', 'Hours']
+                for col in numeric_columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+                worksheet = writer.sheets[sheet_name]
+                for idx, col in enumerate(df.columns, 1):
+                    col_letter = get_column_letter(idx)
+                    if col == 'Hours':
+                        for cell in worksheet[col_letter][1:]:
+                            cell.number_format = '#,##0.0'
+                    elif col == 'Demand':
+                        for cell in worksheet[col_letter][1:]:
+                            cell.number_format = '#,##0'
+            summary_data.to_excel(writer, sheet_name='Summary', index=False)
+            worksheet = writer.sheets['Summary']
+            for row in range(2, worksheet.max_row + 1):
+                value_cell = worksheet.cell(row=row, column=2)
+                metric_cell = worksheet.cell(row=row, column=1)
+                if any(term in metric_cell.value for term in ['Hours', 'Time']):
+                    value_cell.number_format = '#,##0.0'
+                elif any(term in metric_cell.value for term in ['Orders', 'Count', 'Quantity']):
+                    value_cell.number_format = '#,##0'
+                elif 'Rate' in metric_cell.value or 'Speed' in metric_cell.value:
+                    value_cell.number_format = '#,##0.0'
+                if metric_cell.value.startswith('---'):
+                    for col in range(1, 3):
+                        cell = worksheet.cell(row=row, column=col)
+                        cell.fill = separator_fill
+                elif any(metric_cell.value.startswith(prefix) for prefix in ['Total', 'Releasable', 'BVI', 'Malosa', 'Manufacturing', 'Assembly', 'Packaging', 'Virtuoso']):
+                    metric_cell.font = bold_font
+            for col in range(1, 3):
+                cell = worksheet.cell(row=1, column=col)
+                cell.font = bold_font
+                cell.fill = header_fill
+            for column in worksheet.columns:
+                max_length = 0
+                column = [cell for cell in column]
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                    adjusted_width = (max_length + 2)
+                    worksheet.column_dimensions[column[0].column_letter].width = adjusted_width
+            if len(scenarios_for_comparison) > 1:
+                comparison_df_formatted = comparison_df.copy()
+                numeric_columns = [
+                    'Total Orders', 'Releasable Orders', 'Held Orders', 'Piggyback Orders',
+                    'Total Hours', 'Releasable Hours', 'BVI Kits', 'BVI Kit Hours', 'BVI Kit Qty',
+                    'Malosa Kits', 'Malosa Kit Hours', 'Malosa Kit Qty', 'Total Kits', 'Total Kit Hours',
+                    'Total Kit Qty', 'Manufacturing (3802)', 'Manufacturing Hours', 'Manufacturing Qty',
+                    'Assembly (3803)', 'Assembly Hours', 'Assembly Qty', 'Packaging (3804)', 'Packaging Hours',
+                    'Packaging Qty', 'Malosa Inst (3805)', 'Malosa Inst Hours', 'Malosa Inst Qty',
+                    'Virtuoso (3806)', 'Virtuoso Hours', 'Virtuoso Qty', 'Total Instruments',
+                    'Total Inst Hours', 'Total Inst Qty', 'Committed Parts', 'Committed Qty',
+                    'Kit Samples', 'Kit Samples Hours', 'Kit Samples Qty'
+                ]
+                for col in numeric_columns:
+                    if col in comparison_df_formatted.columns:
+                        comparison_df_formatted[col] = comparison_df_formatted[col].astype(str).str.replace(',', '').str.replace('$', '')
+                        comparison_df_formatted[col] = pd.to_numeric(comparison_df_formatted[col], errors='coerce')
+                pct_columns = ['Release Rate (%)', 'Qty Release Rate (%)', 'Labor Release Rate (%)']
+                for col in pct_columns:
+                    if col in comparison_df_formatted.columns:
+                        comparison_df_formatted[col] = comparison_df_formatted[col].astype(str).str.rstrip('%').astype(float) / 100
+                comparison_df_formatted.to_excel(writer, sheet_name='Strategy Comparison', index=False)
+                comp_worksheet = writer.sheets['Strategy Comparison']
+                for col_idx, col_name in enumerate(comparison_df_formatted.columns, 1):
+                    col_letter = get_column_letter(col_idx)
+                    if col_name in pct_columns:
+                        for cell in comp_worksheet[col_letter][1:]:
+                            cell.number_format = '0.0%'
+                    elif 'Hours' in str(col_name):
+                        for cell in comp_worksheet[col_letter][1:]:
+                            cell.number_format = '#,##0.0'
+                    elif any(term in str(col_name) for term in ['Orders', 'Qty', 'Count', 'Parts']):
+                        for cell in comp_worksheet[col_letter][1:]:
+                            cell.number_format = '#,##0'
+                for col in range(1, comp_worksheet.max_column + 1):
+                    cell = comp_worksheet.cell(row=1, column=col)
+                    cell.font = bold_font
+                    cell.fill = header_fill
+                    max_length = 0
+                    column = [cell for cell in comp_worksheet[get_column_letter(col)]]
+                    for cell in column:
+                        try:
+                            if len(str(cell.value)) > max_length:
+                                max_length = len(str(cell.value))
+                        except:
+                            pass
+                        adjusted_width = min((max_length + 2), 50)
+                        comp_worksheet.column_dimensions[get_column_letter(col)].width = adjusted_width
+            quick_analysis_excel_buffer.seek(0)
+            output_file = None
+        # ... existing code ...
+        # Show/hide download button
+        if no_export_var.get():
+            download_btn.grid()
+        else:
+            download_btn.grid_remove()
+        # ... existing code ...
     except Exception as e:
         messagebox.showerror("Error", f"Processing failed:\n\n{str(e)}")
         status_var.set("❌ Processing failed")
+        download_btn.grid_remove()
 
 def generate_performance_report():
     """Generate detailed performance report with phase breakdown"""
@@ -2239,6 +2364,9 @@ root = tk.Tk()
 root.title(f"PlanSnap {VERSION} - Material Release Planning Tool")
 root.geometry("600x650")
 
+# Global buffer for quick analysis Excel file
+quick_analysis_excel_buffer = None
+
 # Main frame
 main_frame = ttk.Frame(root, padding="20")
 main_frame.grid(row=0, column=0, sticky="nsew")
@@ -2312,7 +2440,7 @@ material_frame.grid(row=5, column=0, pady=(0, 10), sticky="ew")
 include_kits_var = tk.BooleanVar(value=True)
 include_instruments_var = tk.BooleanVar(value=True)
 include_virtuoso_var = tk.BooleanVar(value=True)
-include_kit_samples_var = tk.BooleanVar(value=True)
+include_kit_samples_var = tk.BooleanVar(value=False)
 
 # Kits checkbox
 kits_checkbox = ttk.Checkbutton(
@@ -2369,7 +2497,8 @@ process_btn.grid(row=6, column=0, pady=(10, 20))
 style = ttk.Style()
 style.configure('Big.TButton', font=('Arial', 12, 'bold'))
 style.configure('Big.TCheckbutton', font=('Arial', 10, 'bold'))
-style.configure('Success.TFrame', background='#7ff09a')
+style.configure('Success.TFrame', background='#7ff09a')  # Green for normal mode
+style.configure('Quick.TFrame', background='#87ceeb')    # Blue for quick mode
 
 # Status
 status_var = tk.StringVar()
@@ -2391,6 +2520,79 @@ scrollbar.grid(row=0, column=1, sticky="ns")
 
 copy_btn = ttk.Button(main_frame, text="📋 Copy Summary", command=copy_summary_to_clipboard)
 copy_btn.grid(row=9, column=0, pady=(10, 10))
+
+# Download button for Quick Analysis
+def download_quick_analysis_file():
+    global quick_analysis_excel_buffer
+    if quick_analysis_excel_buffer is None:
+        messagebox.showerror("No file", "No quick analysis file available.")
+        return
+    
+    try:
+        # Check if buffer has data
+        if quick_analysis_excel_buffer.getvalue() == b'':
+            messagebox.showerror("No data", "Quick analysis buffer is empty.")
+            return
+            
+        # Try to get a default filename
+        default_filename = f"Quick_Analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            title="Save Quick Analysis Results",
+            initialfile=default_filename
+        )
+        
+        if file_path:
+            # Ensure the buffer is at the beginning
+            quick_analysis_excel_buffer.seek(0)
+            
+            # Get the buffer data
+            buffer_data = quick_analysis_excel_buffer.getvalue()
+            
+            # Check if we have data to write
+            if not buffer_data:
+                messagebox.showerror("Error", "No data available to save.")
+                return
+            
+            # Write the file with proper error handling
+            with open(file_path, "wb") as f:
+                f.write(buffer_data)
+            
+        else:
+            # User cancelled the save dialog
+            pass
+            
+    except Exception as e:
+        # Try fallback approach for executable
+        try:
+            # Try to save to desktop as fallback
+            desktop_path = os.path.join(os.path.expanduser("~"), "Desktop")
+            if not os.path.exists(desktop_path):
+                desktop_path = os.path.join(os.path.expanduser("~"), "OneDrive - BVI\\Desktop")
+            
+            fallback_filename = f"Quick_Analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            fallback_path = os.path.join(desktop_path, fallback_filename)
+            
+            quick_analysis_excel_buffer.seek(0)
+            buffer_data = quick_analysis_excel_buffer.getvalue()
+            
+            with open(fallback_path, "wb") as f:
+                f.write(buffer_data)
+            
+            messagebox.showinfo("Success", f"File saved to desktop:\n{fallback_path}")
+            
+        except Exception as fallback_error:
+            messagebox.showerror("Error", f"Failed to save file:\n{str(e)}\n\nFallback also failed:\n{str(fallback_error)}")
+            # For debugging in executable
+            print(f"Error saving file: {str(e)}")
+            print(f"Fallback error: {str(fallback_error)}")
+
+# Add the download button, initially hidden
+download_btn = ttk.Button(main_frame, text="⬇️ Download File", command=download_quick_analysis_file)
+download_btn.grid(row=10, column=0, pady=(10, 10))
+download_btn.grid_remove()
 
 # Configure grid weights
 root.columnconfigure(0, weight=1)
