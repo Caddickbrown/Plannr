@@ -1,3 +1,6 @@
 db_credentials.env
 config.py
 dist/
+build/
+__pycache__/
+.conda/

@@ -239,7 +239,7 @@ def load_demand_data():
 		ON so.CONTRACT = ipt.CONTRACT AND so.PART_NO = ipt.PART_NO
 	WHERE so.CONTRACT = '2051'
 		AND so.ROWSTATE IN ('Planned')
-		AND ipt.PLANNER_BUYER IN ('3001','3801','5001','KIT SAMPLES','3802','3803','3804','3805')
+		AND ipt.PLANNER_BUYER IN ('3001','3801','5001','KIT SAMPLES','3802','3803','3804','3805','3806')
 	ORDER BY so.REVISED_START_DATE, so.ORDER_NO
 	;
     """
@@ -1123,7 +1123,7 @@ def process_single_scenario(scenario_name, status_callback=None, scenario_num=1,
                 part_short = detail.split()[0] if detail.split() else detail
                 shortage_parts_only.append(part_short)
 
-        clean_shortages = "; ".join(shortage_parts_only) if shortage_parts_only else "-"
+        clean_shortages = ";".join(shortage_parts_only) if shortage_parts_only else "-"
 
         # DEBUG: Show final order decision
         if DEBUG_MODE and (debug_so_match or debug_part_match):
@@ -1446,10 +1446,14 @@ def load_and_process_database():
         status_var.set("🔄 Initializing database connection...")
         root.update_idletasks()
         
+        # Hide the Copy Releasable button until processing is complete
+        copy_releasable_btn.grid_remove()
+        
         start_time = time.time()
         main_frame.configure(style='TFrame')
         
-        scenarios = []
+        global scenarios
+        scenarios.clear()  # Clear the global scenarios list
         scenarios_for_comparison = []  # Will store all tested scenarios for comparison tables
         
         # Progress callback function that updates UI immediately
@@ -2156,6 +2160,9 @@ def load_and_process_database():
         else:
             main_frame.configure(style='Success.TFrame')  # Green for normal mode
         
+        # Show the Copy Releasable button after processing is complete
+        copy_releasable_btn.grid()
+        
         # Quick Analysis: Write to BytesIO buffer, don't save to disk
         quick_analysis_excel_buffer = BytesIO()
         with pd.ExcelWriter(quick_analysis_excel_buffer, engine='openpyxl') as writer:
@@ -2269,11 +2276,15 @@ def load_and_process_database():
             download_btn.grid()
         else:
             download_btn.grid_remove()
+        
+        # Show copy releasable button (always visible after processing, including Quick Analysis Mode)
+        copy_releasable_btn.grid()
         # ... existing code ...
     except Exception as e:
         messagebox.showerror("Error", f"Processing failed:\n\n{str(e)}")
         status_var.set("❌ Processing failed")
         download_btn.grid_remove()
+        copy_releasable_btn.grid_remove()
 
 def generate_performance_report():
     """Generate detailed performance report with phase breakdown"""
@@ -2359,6 +2370,45 @@ def copy_summary_to_clipboard():
     copy_btn.config(text="✅ Copied!")
     root.after(2000, lambda: copy_btn.config(text="📋 Copy Summary"))
 
+def copy_releasable_orders_to_clipboard():
+    """Copy a concatenated list of releasable shop orders to clipboard"""
+    global scenarios
+    
+    if not scenarios:
+        messagebox.showwarning("No Data", "No processing results available. Please run the analysis first.")
+        return
+    
+    try:
+        # Get the first scenario's results (or best scenario in min/max mode)
+        scenario = scenarios[0]
+        df_results = scenario['results_df']
+        
+        # Filter for releasable orders
+        releasable_orders = df_results[df_results['Status'] == '✅ Release']
+        
+        if releasable_orders.empty:
+            messagebox.showinfo("No Releasable Orders", "No releasable orders found in the current results.")
+            return
+        
+        # Create concatenated list of shop order numbers
+        shop_orders = releasable_orders['SO Number'].astype(str).tolist()
+        concatenated_list = ";".join(shop_orders)
+        
+        # Copy to clipboard
+        root.clipboard_clear()
+        root.clipboard_append(concatenated_list)
+        root.update()
+        
+        # Update button text temporarily
+        copy_releasable_btn.config(text="✅ Copied!")
+        root.after(2000, lambda: copy_releasable_btn.config(text="📋 Copy Releasable"))
+        
+        # Show success message with count
+        order_count = len(shop_orders)
+        
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to copy releasable orders: {str(e)}")
+
 # Create GUI
 root = tk.Tk()
 root.title(f"PlanSnap {VERSION} - Material Release Planning Tool")
@@ -2366,6 +2416,9 @@ root.geometry("600x650")
 
 # Global buffer for quick analysis Excel file
 quick_analysis_excel_buffer = None
+
+# Global variable to store scenarios data
+scenarios = []
 
 # Main frame
 main_frame = ttk.Frame(root, padding="20")
@@ -2415,7 +2468,7 @@ minmax_tooltip.grid(row=1, column=0, pady=(0, 10))
 no_export_frame = ttk.Frame(main_frame)
 no_export_frame.grid(row=4, column=0, pady=(0, 10))
 
-no_export_var = tk.BooleanVar()
+no_export_var = tk.BooleanVar(value=True)
 no_export_checkbox = ttk.Checkbutton(
     no_export_frame, 
     text="⚡ Quick Analysis Mode",
@@ -2437,9 +2490,9 @@ material_frame = ttk.LabelFrame(main_frame, text="🔧 Material Categories to Pr
 material_frame.grid(row=5, column=0, pady=(0, 10), sticky="ew")
 
 # Create variables for material category checkboxes
-include_kits_var = tk.BooleanVar(value=True)
+include_kits_var = tk.BooleanVar(value=False)
 include_instruments_var = tk.BooleanVar(value=True)
-include_virtuoso_var = tk.BooleanVar(value=True)
+include_virtuoso_var = tk.BooleanVar(value=False)
 include_kit_samples_var = tk.BooleanVar(value=False)
 
 # Kits checkbox
@@ -2519,7 +2572,12 @@ results_text.grid(row=0, column=0, sticky="nsew")
 scrollbar.grid(row=0, column=1, sticky="ns")
 
 copy_btn = ttk.Button(main_frame, text="📋 Copy Summary", command=copy_summary_to_clipboard)
-copy_btn.grid(row=9, column=0, pady=(10, 10))
+copy_btn.grid(row=9, column=0, pady=(10, 5))
+
+# Copy Releasable Orders button
+copy_releasable_btn = ttk.Button(main_frame, text="📋 Copy Releasable", command=copy_releasable_orders_to_clipboard)
+copy_releasable_btn.grid(row=10, column=0, pady=(10, 10))
+copy_releasable_btn.grid_remove()  # Initially hidden
 
 # Download button for Quick Analysis
 def download_quick_analysis_file():
@@ -2591,7 +2649,7 @@ def download_quick_analysis_file():
 
 # Add the download button, initially hidden
 download_btn = ttk.Button(main_frame, text="⬇️ Download File", command=download_quick_analysis_file)
-download_btn.grid(row=10, column=0, pady=(10, 10))
+download_btn.grid(row=11, column=0, pady=(10, 10))
 download_btn.grid_remove()
 
 # Configure grid weights
