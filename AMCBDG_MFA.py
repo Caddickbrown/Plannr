@@ -7,16 +7,444 @@ from datetime import datetime
 import openpyxl
 from openpyxl.styles import PatternFill, Font
 from openpyxl.utils import get_column_letter
-import pymssql
 from dotenv import load_dotenv
 import sys
-from sqlalchemy import create_engine, text
 import psutil
 import gc
 from io import BytesIO
+from typing import Optional, Dict, Any, Callable
+
+# Try to import pyodbc for Azure SQL connections
+try:
+    import pyodbc
+    PYODBC_AVAILABLE = True
+except ImportError:
+    PYODBC_AVAILABLE = False
+    print("Warning: pyodbc not available. Azure SQL connections will not work.")
+
+# Azure authentication imports
+try:
+    from azure.identity import InteractiveBrowserCredential
+    import msal
+    import requests
+    import json
+    import threading
+    AZURE_AVAILABLE = True  # Azure packages are available
+except ImportError:
+    AZURE_AVAILABLE = False
+    print("Warning: Azure authentication modules not available. Install required packages.")
 
 # Load environment variables
 load_dotenv('db_credentials.env')
+
+# Azure Authentication Classes
+class AzureAuthenticator:
+    """Handles Azure authentication with MFA support using InteractiveBrowserCredential"""
+    
+    def __init__(self, tenant_id: str = None, client_id: str = None):
+        # Read from environment variables if not provided
+        self.tenant_id = tenant_id or os.getenv('AZURE_TENANT_ID')
+        self.client_id = client_id or os.getenv('AZURE_CLIENT_ID')
+        
+        if not self.tenant_id:
+            raise ValueError("Azure tenant_id must be provided or set in environment variables")
+            
+        self.credential = None
+        self.access_token = None
+        self.token_expires_at = None
+        
+    def interactive_login(self) -> bool:
+        """Perform interactive browser login"""
+        try:
+            # Create credential with client ID if available
+            # Using PowerQuery client ID to appear as Excel/PowerQuery authentication
+            if self.client_id:
+                self.credential = InteractiveBrowserCredential(
+                    client_id=self.client_id,
+                    tenant_id=self.tenant_id,
+                    # Additional parameters to make it look like PowerQuery
+                    redirect_uri="https://login.microsoftonline.com/common/oauth2/nativeclient"
+                )
+            else:
+                self.credential = InteractiveBrowserCredential(
+                    tenant_id=self.tenant_id
+                )
+            
+            # Get token for Azure SQL Database - using correct scope
+            self.access_token = self.credential.get_token("https://database.windows.net/.default")
+            self.token_expires_at = time.time() + (self.access_token.expires_on - time.time())
+            
+            print("✅ Azure authentication successful!")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Azure authentication failed: {str(e)}")
+            return False
+    
+    def get_access_token(self) -> Optional[str]:
+        """Get current access token, refresh if needed"""
+        if not self.access_token:
+            return None
+            
+        # Check if token needs refresh (refresh 5 minutes before expiry)
+        if time.time() > (self.token_expires_at - 300):
+            try:
+                self.access_token = self.credential.get_token("https://database.windows.net/.default")
+                self.token_expires_at = time.time() + (self.access_token.expires_on - time.time())
+                print("🔄 Azure token refreshed")
+            except Exception as e:
+                print(f"❌ Token refresh failed: {str(e)}")
+                return None
+        
+        return self.access_token.token
+    
+    def is_authenticated(self) -> bool:
+        """Check if currently authenticated"""
+        return self.access_token is not None and time.time() < self.token_expires_at
+    
+    def logout(self):
+        """Clear authentication state"""
+        self.credential = None
+        self.access_token = None
+        self.token_expires_at = None
+        print("🔓 Azure session cleared")
+
+
+class AzureSQLConnection:
+    """Manages Azure SQL Database connections with authentication"""
+    
+    def __init__(self, server: str = None, database: str = None, authenticator: AzureAuthenticator = None):
+        # Read from environment variables if not provided
+        self.server = server or os.getenv('DB_HOST')
+        self.database = database or os.getenv('DB_NAME')
+        
+        if not self.server or not self.database:
+            raise ValueError("Azure server and database must be provided or set in environment variables")
+            
+        # Create authenticator if not provided
+        if authenticator is None:
+            self.authenticator = AzureAuthenticator()
+        else:
+            self.authenticator = authenticator
+        
+    def get_connection_string(self) -> Optional[str]:
+        """Build pyodbc connection string for driver-handled authentication"""
+        # No need to check authenticator since driver will handle auth
+            
+        # Get port from environment variables, default to 1433
+        port = os.getenv('DB_PORT', '1433')
+        
+        # Determine best available ODBC driver (prefer 18, fallback to 17)
+        driver_name = "ODBC Driver 17 for SQL Server"
+        try:
+            import pyodbc
+            available = [d.strip() for d in pyodbc.drivers()]
+            if "ODBC Driver 18 for SQL Server" in available:
+                driver_name = "ODBC Driver 18 for SQL Server"
+            elif "ODBC Driver 17 for SQL Server" in available:
+                driver_name = "ODBC Driver 17 for SQL Server"
+        except Exception:
+            pass
+
+        # Format server with tcp prefix and port for Azure SQL
+        port = os.getenv('DB_PORT', '1433')
+        server_endpoint = f"tcp:{self.server},{port}"
+
+        # Build connection string for Azure SQL with driver-handled AAD authentication
+        connection_string = (
+            f"DRIVER={{{driver_name}}};"
+            f"SERVER={server_endpoint};"
+            f"DATABASE={self.database};"
+            f"Authentication=ActiveDirectoryInteractive;"
+            f"Encrypt=yes;"
+            f"TrustServerCertificate=no;"
+            f"Login Timeout=30;"
+        )
+        
+        # Debug: Print connection string (no token included)
+        print(f"🔗 Connection string: {connection_string}")
+        
+        return connection_string
+    
+    def test_connection(self) -> tuple[bool, str]:
+        """Test connection using pyodbc"""
+        try:
+            import pyodbc
+            # Prefer named constant for the access token attribute if available
+            try:
+                from pyodbc import SQL_COPT_SS_ACCESS_TOKEN
+            except Exception:
+                SQL_COPT_SS_ACCESS_TOKEN = 1256
+            connection_string = self.get_connection_string()
+            if not connection_string:
+                return False, "No valid access token available"
+                
+            # Connect using driver-handled AAD authentication
+            conn = pyodbc.connect(connection_string)
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            if result and result[0] == 1:
+                return True, "Connection successful"
+            else:
+                return False, "Connection test failed"
+                
+        except Exception as e:
+            return False, f"Connection error: {type(e).__name__}: {str(e)}"
+
+
+class AzureLoginWindow:
+    """GUI window for Azure authentication"""
+    
+    def __init__(self, parent: tk.Tk, on_success: Callable = None, on_cancel: Callable = None):
+        self.parent = parent
+        self.on_success = on_success
+        self.on_cancel = on_cancel
+        self.authenticator = None
+        
+        # Create window
+        self.window = tk.Toplevel(parent)
+        self.window.title("Azure Authentication")
+        self.window.geometry("400x300")
+        self.window.resizable(False, False)
+        self.window.transient(parent)
+        self.window.grab_set()
+        
+        # Center window
+        self.window.update_idletasks()
+        x = (self.window.winfo_screenwidth() // 2) - (400 // 2)
+        y = (self.window.winfo_screenheight() // 2) - (300 // 2)
+        self.window.geometry(f"400x300+{x}+{y}")
+        
+        # Create widgets
+        self._create_widgets()
+        
+        # Bind close event to smart close handler
+        self.window.protocol("WM_DELETE_WINDOW", self._smart_close)
+        
+    def _create_widgets(self):
+        """Create and layout widgets"""
+        # Main frame
+        main_frame = ttk.Frame(self.window, padding="20")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # Title
+        title_label = ttk.Label(main_frame, text="Azure Authentication", font=("Arial", 16, "bold"))
+        title_label.grid(row=0, column=0, columnspan=2, pady=(0, 20))
+        
+        # Instructions
+        instructions = ttk.Label(
+            main_frame, 
+            text="Click 'Login' to authenticate with Azure.\nThis will open your browser for MFA verification.",
+            wraplength=350,
+            justify=tk.CENTER
+        )
+        instructions.grid(row=1, column=0, columnspan=2, pady=(0, 20))
+        
+        # Login button
+        self.login_btn = ttk.Button(
+            main_frame, 
+            text="Login with Azure", 
+            command=self._start_login,
+            style="Accent.TButton"
+        )
+        self.login_btn.grid(row=2, column=0, columnspan=2, pady=(0, 20))
+        
+        # Status label
+        self.status_label = ttk.Label(main_frame, text="", foreground="blue")
+        self.status_label.grid(row=3, column=0, columnspan=2, pady=(0, 20))
+        
+        # Buttons frame
+        button_frame = ttk.Frame(main_frame)
+        button_frame.grid(row=4, column=0, columnspan=2, pady=(0, 20))
+        
+        # Cancel button
+        cancel_btn = ttk.Button(button_frame, text="Cancel", command=self._cancel_login)
+        cancel_btn.grid(row=0, column=0, padx=(0, 10))
+        
+        # Test connection button (initially disabled)
+        self.test_btn = ttk.Button(
+            button_frame, 
+            text="Test Connection", 
+            command=self._test_connection,
+            state="disabled"
+        )
+        self.test_btn.grid(row=0, column=0, padx=(0, 10))
+        
+        # Ok button (initially disabled)
+        self.ok_btn = ttk.Button(
+            button_frame, 
+            text="OK", 
+            command=self._confirm_and_close,
+            state="disabled"
+        )
+        self.ok_btn.grid(row=0, column=1)
+        
+    def _start_login(self):
+        """Start login process in separate thread"""
+        self.login_btn.config(state="disabled")
+        self.status_label.config(text="Opening browser for authentication...", foreground="blue")
+        
+        # Run login in separate thread to prevent UI freezing
+        thread = threading.Thread(target=self._perform_login)
+        thread.daemon = True
+        thread.start()
+        
+    def _perform_login(self):
+        """Perform the actual login"""
+        try:
+            # Load Azure config
+            config = self._load_azure_config()
+            if not config:
+                self._handle_error("Azure configuration not found. Please check environment variables (AZURE_TENANT_ID, AZURE_CLIENT_ID, DB_HOST, DB_NAME)")
+                return
+                
+            # Create authenticator
+            self.authenticator = AzureAuthenticator(
+                tenant_id=config['tenant_id'],
+                client_id=config.get('client_id')
+            )
+            
+            # Perform login
+            if self.authenticator.interactive_login():
+                self._login_success()
+            else:
+                self._handle_error("Authentication failed")
+                
+        except Exception as e:
+            self._handle_error(f"Login error: {str(e)}")
+    
+    def _login_success(self):
+        """Handle successful login"""
+        self.login_successful = True  # Mark login as successful
+        self.parent.after(0, lambda: self.status_label.config(
+            text="✅ Authentication successful!", foreground="green"
+        ))
+        self.parent.after(0, lambda: self.test_btn.config(state="normal"))
+        self.parent.after(0, lambda: self.ok_btn.config(state="normal"))
+        
+        if self.on_success:
+            self.on_success(self.authenticator)
+    
+    def _handle_error(self, message: str):
+        """Handle login errors"""
+        self.parent.after(0, lambda: self.status_label.config(
+            text=f"❌ {message}", foreground="red"
+        ))
+        self.parent.after(0, lambda: self.login_btn.config(state="normal"))
+    
+    def _test_connection(self):
+        """Test database connection"""
+        if not self.authenticator:
+            return
+            
+        config = self._load_azure_config()
+        if not config:
+            return
+            
+        connection = AzureSQLConnection(
+            server=config['server'],
+            database=config['database'],
+            authenticator=self.authenticator
+        )
+        
+        success, message = connection.test_connection()
+        if success:
+            self.status_label.config(text="✅ Connection test successful!", foreground="green")
+        else:
+            self.status_label.config(text=f"❌ Connection failed: {message}", foreground="red")
+    
+    def _load_azure_config(self) -> Optional[Dict[str, Any]]:
+        """Load Azure configuration from environment variables"""
+        try:
+            # Get configuration from environment variables
+            tenant_id = os.getenv('AZURE_TENANT_ID')
+            client_id = os.getenv('AZURE_CLIENT_ID')
+            server = os.getenv('DB_HOST')
+            database = os.getenv('DB_NAME')
+            
+            if tenant_id and server and database:
+                return {
+                    'tenant_id': tenant_id,
+                    'client_id': client_id,
+                    'server': server,
+                    'database': database
+                }
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error loading Azure config: {str(e)}")
+            return None
+    
+    def _confirm_and_close(self):
+        """Confirm successful authentication and close window"""
+        if self.on_success and self.authenticator:
+            self.on_success(self.authenticator)
+        self.window.destroy()
+    
+    def _smart_close(self):
+        """Smart close handler - only cancel if login wasn't successful"""
+        if self.login_successful and self.authenticator:
+            # If login was successful, just close without cancelling
+            self.window.destroy()
+        else:
+            # If login wasn't successful, cancel the login
+            self._cancel_login()
+    
+    def _cancel_login(self):
+        """Cancel login and close window"""
+        if self.on_cancel:
+            self.on_cancel()
+        self.window.destroy()
+
+
+def show_azure_login(parent: tk.Tk, on_success: Callable = None, on_cancel: Callable = None) -> AzureLoginWindow:
+    """Helper function to show Azure login window"""
+    return AzureLoginWindow(parent, on_success, on_cancel)
+
+
+
+
+
+def create_azure_authenticator() -> Optional[AzureAuthenticator]:
+    """Create Azure authenticator from configuration"""
+    try:
+        tenant_id = os.getenv('AZURE_TENANT_ID')
+        client_id = os.getenv('AZURE_CLIENT_ID')
+        if not tenant_id:
+            return None
+            
+        return AzureAuthenticator(tenant_id=tenant_id, client_id=client_id)
+    except Exception as e:
+        print(f"Error creating Azure authenticator: {str(e)}")
+        return None
+
+
+def create_azure_sql_connection() -> Optional[AzureSQLConnection]:
+    """Create Azure SQL connection from configuration"""
+    try:
+        server = os.getenv('DB_HOST')
+        database = os.getenv('DB_NAME')
+        
+        if not server or not database:
+            return None
+            
+        authenticator = create_azure_authenticator()
+        if not authenticator:
+            return None
+            
+        return AzureSQLConnection(
+            server=server,
+            database=database,
+            authenticator=authenticator
+        )
+    except Exception as e:
+        print(f"Error creating Azure SQL connection: {str(e)}")
+        return None
 
 # Performance tracking utilities
 class PerformanceTracker:
@@ -111,8 +539,8 @@ def timing_decorator(phase_name):
     return decorator
 
 # VERSION INFO
-VERSION = "v2.0.0"
-VERSION_DATE = "2025-07-29"
+VERSION = "v3.0.0"
+VERSION_DATE = "2025-08-13"
 DEBUG_MODE = False
 DEBUG_COMPONENT_PART = None  # Set to a specific part number (as string) to track, e.g. "8034855"
 DEBUG_SO_NUMBER = 9682591
@@ -121,12 +549,9 @@ DEBUG_SO_NUMBER = 9682591
 # Global variables
 quick_analysis_excel_buffer = None
 
-# Database configuration
+# Azure Database configuration
 DB_HOST = os.getenv('DB_HOST', 'localhost')
-DB_USER = os.getenv('DB_USER', 'myuser')
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'mypassword')
 DB_NAME = os.getenv('DB_NAME', 'mydatabase')
-DB_PORT = os.getenv('DB_PORT', '1433')
 
 # Print debug configuration at startup
 if DEBUG_MODE:
@@ -184,42 +609,67 @@ if DEBUG_MODE:
     print("="*60 + "\n")
 
 def get_database_connection():
-    """Create and return a SQLAlchemy engine for SQL Server"""
+    """Create and return a pyodbc connection for Azure SQL using Azure AD authentication"""
     try:
-        # Create connection string for SQL Server
-        connection_string = f"mssql+pyodbc://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}?driver=ODBC+Driver+17+for+SQL+Server"
+        # Check if Azure authentication is available and configured
+        if not AZURE_AVAILABLE:
+            raise Exception("Azure authentication is not available. Please install required packages.")
         
-        # Create SQLAlchemy engine with SSMS-like parameters
-        engine = create_engine(
-            connection_string,
-            connect_args={
-                'appname': 'Microsoft SQL Server Management Studio - Query',
-                'charset': 'utf8',
-                'login_timeout': 30,
-                'timeout': 30
-            },
-            echo=False  # Set to True for SQL query logging
+        # Authentication will be handled by the ODBC driver when connecting
+        # No need to pre-authenticate since we're using ActiveDirectoryInteractive
+        
+        # Get server and database from environment variables
+        server = os.getenv('DB_HOST')
+        database = os.getenv('DB_NAME')
+        
+        if not server or not database:
+            raise Exception("Database configuration not found. Please check your environment variables.")
+        
+        # Create Azure SQL connection (authenticator not needed for driver-handled auth)
+        azure_conn = AzureSQLConnection(
+            server=server,
+            database=database,
+            authenticator=None
         )
-        return engine
+        
+        # Get connection string and create connection
+        connection_string = azure_conn.get_connection_string()
+        if not connection_string:
+            raise Exception("Failed to get Azure connection string.")
+        
+        # Create pyodbc connection using driver-handled AAD authentication
+        import pyodbc
+        conn = pyodbc.connect(connection_string)
+        return conn
+        
     except Exception as e:
-        raise Exception(f"SQL Server connection failed: {str(e)}")
+        raise Exception(f"Azure database connection failed: {str(e)}")
 
 def execute_query(query, params=None):
-    """Execute a SQL query and return results as a pandas DataFrame"""
-    engine = None
+    """Execute a SQL query and return results as a pandas DataFrame using Azure authentication"""
+    connection = None
     try:
-        engine = get_database_connection()
-        # Use SQLAlchemy text() for parameterized queries
+        connection = get_database_connection()
+        
+        # Create cursor and execute query
+        cursor = connection.cursor()
         if params:
-            df = pd.read_sql_query(text(query), engine, params=params)
+            cursor.execute(query, params)
         else:
-            df = pd.read_sql_query(text(query), engine)
+            cursor.execute(query)
+        
+        # Fetch results
+        columns = [column[0] for column in cursor.description]
+        rows = cursor.fetchall()
+        df = pd.DataFrame.from_records(rows, columns=columns)
+        cursor.close()
         return df
+            
     except Exception as e:
         raise Exception(f"Query execution failed: {str(e)}")
     finally:
-        if engine:
-            engine.dispose()
+        if connection:
+            connection.close()
 
 @timing_decorator("Load Demand Data")
 def load_demand_data():
@@ -379,13 +829,16 @@ def load_pos_data():
 def test_database_connection():
     """Test the database connection and return status"""
     try:
-        engine = get_database_connection()
-        if engine:
-            # Test the connection by executing a simple query
-            with engine.connect() as connection:
-                connection.execute(text("SELECT 1"))
-            engine.dispose()
-            return True, "Database connection successful"
+        conn = get_database_connection()
+        if conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            row = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            if row and row[0] == 1:
+                return True, "Database connection successful"
+            return False, "Database connection test failed"
     except Exception as e:
         return False, f"Database connection failed: {str(e)}"
     return False, "Database connection failed: Unknown error"
@@ -393,17 +846,20 @@ def test_database_connection():
 def get_table_info():
     """Get information about available tables in SQL Server"""
     try:
-        engine = get_database_connection()
-        with engine.connect() as connection:
-            result = connection.execute(text("""
-                SELECT table_name 
-                FROM information_schema.tables 
-                WHERE table_type = 'BASE TABLE'
-            """))
-            tables = [row[0] for row in result.fetchall()]
-        engine.dispose()
+        conn = get_database_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT table_name 
+            FROM information_schema.tables 
+            WHERE table_type = 'BASE TABLE'
+            """
+        )
+        tables = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
         return tables
-    except Exception as e:
+    except Exception:
         return []
 
 def normalize_so_number(so_val):
@@ -649,6 +1105,8 @@ def process_single_scenario(scenario_name, status_callback=None, scenario_num=1,
 
     # Build labor standards dictionary (unchanged)
     df_hours["PART_NO"] = df_hours["PART_NO"].astype(str)
+    # Convert Hours per Unit to float to handle decimal.Decimal types from database
+    df_hours["Hours per Unit"] = pd.to_numeric(df_hours["Hours per Unit"], errors='coerce').fillna(0.0)
     labor_standards = df_hours.groupby("PART_NO")["Hours per Unit"].sum().to_dict()
     
     if status_callback:
@@ -667,7 +1125,7 @@ def process_single_scenario(scenario_name, status_callback=None, scenario_num=1,
     df_main['Start Date'] = pd.to_datetime(df_main['Start Date'], errors='coerce')
     df_main["Part"] = df_main["Part"].astype(str)
     df_main["Planner"] = df_main["Planner"].fillna("UNKNOWN").astype(str)
-    df_main["Demand"] = pd.to_numeric(df_main["Demand"], errors='coerce').fillna(0)
+    df_main["Demand"] = pd.to_numeric(df_main["Demand"], errors='coerce').fillna(0.0)
     
     # Filter data based on selected categories
     filtered_df_main = df_main.copy()
@@ -926,6 +1384,9 @@ def process_single_scenario(scenario_name, status_callback=None, scenario_num=1,
         
         # Calculate labor hours for this order
         base_hours = labor_standards.get(part, 0)
+        # Convert to float to handle decimal.Decimal types from database
+        base_hours = float(base_hours) if base_hours else 0.0
+        demand_qty = float(demand_qty) if demand_qty else 0.0
         labor_hours = base_hours * demand_qty
         
         if len(bom) > 0:
@@ -2409,6 +2870,11 @@ def copy_releasable_orders_to_clipboard():
     except Exception as e:
         messagebox.showerror("Error", f"Failed to copy releasable orders: {str(e)}")
 
+# Global Azure authenticator
+azure_authenticator = None
+
+# Azure authentication is now handled automatically in get_database_connection()
+
 # Create GUI
 root = tk.Tk()
 root.title(f"PlanSnap {VERSION} - Material Release Planning Tool")
@@ -2561,7 +3027,7 @@ status_label.grid(row=7, column=0, pady=(0, 10), sticky=tk.W)
 
 # Results area
 results_frame = ttk.LabelFrame(main_frame, text="📊 Results", padding="10")
-results_frame.grid(row=8, column=0, sticky="nsew", pady=(10, 0))
+results_frame.grid(row=9, column=0, sticky="nsew", pady=(10, 0))
 
 results_text = tk.Text(results_frame, height=18, width=90, font=('Consolas', 9))
 scrollbar = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=results_text.yview)
@@ -2572,11 +3038,11 @@ results_text.grid(row=0, column=0, sticky="nsew")
 scrollbar.grid(row=0, column=1, sticky="ns")
 
 copy_btn = ttk.Button(main_frame, text="📋 Copy Summary", command=copy_summary_to_clipboard)
-copy_btn.grid(row=9, column=0, pady=(10, 5))
+copy_btn.grid(row=8, column=0, pady=(10, 5))
 
 # Copy Releasable Orders button
 copy_releasable_btn = ttk.Button(main_frame, text="📋 Copy Releasable", command=copy_releasable_orders_to_clipboard)
-copy_releasable_btn.grid(row=10, column=0, pady=(10, 10))
+copy_releasable_btn.grid(row=8, column=0, pady=(10, 10))
 copy_releasable_btn.grid_remove()  # Initially hidden
 
 # Download button for Quick Analysis
@@ -2649,14 +3115,14 @@ def download_quick_analysis_file():
 
 # Add the download button, initially hidden
 download_btn = ttk.Button(main_frame, text="⬇️ Download File", command=download_quick_analysis_file)
-download_btn.grid(row=11, column=0, pady=(10, 10))
+download_btn.grid(row=10, column=0, pady=(10, 10))
 download_btn.grid_remove()
 
 # Configure grid weights
 root.columnconfigure(0, weight=1)
 root.rowconfigure(0, weight=1)
 main_frame.columnconfigure(0, weight=1)
-main_frame.rowconfigure(8, weight=1)
+main_frame.rowconfigure(9, weight=1)
 results_frame.columnconfigure(0, weight=1)
 results_frame.rowconfigure(0, weight=1)
 
